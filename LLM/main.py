@@ -69,11 +69,15 @@ MEMORY_TIMEOUT = 600.0  # seconds of silence after which the old conversation is
 # tag, the answer is made up, so ask() makes it try again.
 LIVE_DATA_RE = re.compile(
     r"\b(news|headlines?|weather|temperature|forecast|raining|snowing|"
+    r"earthquakes?|space station|iss|public ip|ip address|website|github|"
+    r"pollen|package version|pypi|npm|"
     r"what('?s| is) the time|what time|current time|what day|today'?s date|what('?s| is) the date)\b",
     re.IGNORECASE,
 )
 _STREAM_UNSAFE_RE = re.compile(
     r"\b(weather|forecast|headlines?|news|temperature|raining|snowing|"
+    r"earthquakes?|space station|iss|public ip|ip address|website|github|"
+    r"pollen|package version|pypi|npm|"
     r"time|date|remind(?:er)?|timer|alarm|automation|schedule|volume|"
     r"calculate|compute|convert|currency|exchange rate|crypto|bitcoin|"
     r"price|define|translate|wiki|PC status|computer status|stopwatch)\b",

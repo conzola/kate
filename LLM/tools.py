@@ -2703,6 +2703,719 @@ def inspire_me() -> str:
     return f"{quote_}, {'says the' if 'proverb' in author.lower() else 'said'} {author}"
 
 
+# =============================================================================
+# 20 MORE TOOLS: live data and handy calculators
+# Keyless services: USGS, wheretheiss.at, CountriesNow, ipify, GitHub,
+# PyPI / npm, TheCocktailDB, Open Library, MusicBrainz, AniList, PokeAPI,
+# catfact.ninja, Wikipedia and Open-Meteo.
+# Results are written to be spoken: short, no emoji, no trailing period.
+# =============================================================================
+def _time_ago(stamp: float) -> str:
+    """'12 minutes ago' for an epoch timestamp."""
+    try:
+        seconds = max(0.0, time.time() - float(stamp))
+    except (TypeError, ValueError, OverflowError):
+        return ""
+    if seconds < 90:
+        return "just now"
+    if seconds < 3600:
+        return f"{round(seconds / 60)} minutes ago"
+    if seconds < 86400:
+        hours = round(seconds / 3600)
+        return f"{hours} {'hour' if hours == 1 else 'hours'} ago"
+    days = int(seconds // 86400)
+    return "yesterday" if days == 1 else f"{days} days ago"
+
+
+def _reverse_place(latitude, longitude) -> str:
+    """A rough place name for coordinates, or '' when it cannot be looked up."""
+    try:
+        response = requests.get(
+            "https://nominatim.openstreetmap.org/reverse",
+            params={"format": "jsonv2", "lat": latitude, "lon": longitude,
+                    "zoom": 3, "addressdetails": 1},
+            headers={**UA, "Accept-Language": "en"}, timeout=8,
+        )
+        if response.status_code != 200:
+            return ""
+        data = response.json()
+        address = data.get("address") or {}
+        for key in ("country", "state", "city", "town", "village", "county", "ocean", "sea"):
+            if address.get(key):
+                return address[key]
+        return (data.get("display_name") or "").split(",")[0].strip()
+    except (requests.RequestException, ValueError):
+        return ""
+
+
+def _post_json(url: str, payload: dict, headers: dict = None):
+    """POST a JSON document. Returns None on any failure, like _get."""
+    try:
+        response = requests.post(url, json=payload, headers={**UA, **(headers or {})}, timeout=15)
+        if response.status_code != 200:
+            return None
+        return response.json()
+    except (requests.RequestException, ValueError):
+        return None
+
+
+# ---- live data --------------------------------------------------------------
+def get_earthquakes(period: str = "day", count: str = "3") -> str:
+    """Recent notable earthquakes from the USGS feed."""
+    low = (period or "day").lower()
+    window = "week" if "week" in low else "month" if "month" in low else "day"
+    try:
+        n = max(1, min(5, int(re.search(r"\d+", str(count or "3")).group())))
+    except (AttributeError, ValueError):
+        n = 3
+    data = _get(f"https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/4.5_{window}.geojson")
+    features = (data or {}).get("features") or []
+    if not features:
+        return f"I could not find any notable earthquakes in the last {window}"
+    items = []
+    for feature in features[:n]:
+        props = feature.get("properties") or {}
+        magnitude = props.get("mag")
+        if not isinstance(magnitude, (int, float)):
+            continue
+        place = (props.get("place") or "an unknown place").strip()
+        stamp = props.get("time")
+        when = _time_ago(stamp / 1000) if isinstance(stamp, (int, float)) else ""
+        items.append(f"magnitude {_num(round(magnitude, 1))} near {place}" + (f", {when}" if when else ""))
+    if not items:
+        return "Sorry, I could not read the earthquake report"
+    return f"Notable earthquakes in the last {window}: " + "; ".join(items)
+
+
+def iss_location() -> str:
+    """Where the International Space Station is right now."""
+    data = _get("https://api.wheretheiss.at/v1/satellites/25544")
+    if not data:
+        return "Sorry, I could not find the space station"
+    try:
+        latitude, longitude = float(data["latitude"]), float(data["longitude"])
+    except (KeyError, TypeError, ValueError):
+        return "Sorry, I could not read the space station position"
+    text = (f"the International Space Station is at {abs(latitude):.1f} degrees "
+            f"{'north' if latitude >= 0 else 'south'}, {abs(longitude):.1f} degrees "
+            f"{'east' if longitude >= 0 else 'west'}")
+    place = _reverse_place(latitude, longitude)
+    if place:
+        text += f", over {place}"
+    speed = data.get("velocity")
+    if isinstance(speed, (int, float)):
+        text += f", moving at about {_num(round(speed))} kilometers per hour"
+    return text
+
+
+_COUNTRY_LIST = []
+
+
+def _country_rows() -> list:
+    """The CountriesNow country list, fetched once per process."""
+    global _COUNTRY_LIST
+    if not _COUNTRY_LIST:
+        data = _get("https://countriesnow.space/api/v0.1/countries/info",
+                    {"returns": "currency,capital"})
+        _COUNTRY_LIST = (data or {}).get("data") or []
+    return _COUNTRY_LIST
+
+
+def country_info(country: str = "") -> str:
+    """Capital, population and currency of a country."""
+    name = (country or "").strip()
+    if not name:
+        return "Tell me which country"
+    rows = _country_rows()
+    low = name.lower()
+    match = next((r for r in rows if str(r.get("name", "")).lower() == low), None)
+    if match is None:
+        match = next((r for r in rows if low in str(r.get("name", "")).lower()
+                      or str(r.get("name", "")).lower() in low), None)
+    if match is None:
+        return f"I could not find a country called {name}"
+    common = match.get("name") or name.title()
+    capital = match.get("capital") or "no capital listed"
+    currency = match.get("currency") or ""
+    parts = [f"{common}, capital {capital}"]
+    population = _post_json("https://countriesnow.space/api/v0.1/countries/population",
+                            {"country": common})
+    counts = ((population or {}).get("data") or {}).get("populationCounts") or []
+    latest = max((c for c in counts if isinstance(c, dict)),
+                 key=lambda c: c.get("year", 0), default=None)
+    value = (latest or {}).get("value")
+    if isinstance(value, (int, float)):
+        parts.append(f"about {_num(round(value))} people")
+    if currency:
+        parts.append(f"currency {_CURRENCY_NAMES.get(currency, currency)}")
+    return ", ".join(parts)
+
+
+def public_ip() -> str:
+    """The user's public IP address."""
+    data = _get("https://api.ipify.org", {"format": "json"})
+    address = (data or {}).get("ip")
+    if not address:
+        return "Sorry, I could not find your public IP address"
+    return f"your public IP address is {address}"
+
+
+def website_status(site: str = "") -> str:
+    """Check whether a website answers, and how quickly."""
+    raw = (site or "").strip()
+    if not raw:
+        return "Tell me which website to check"
+    if not re.match(r"^https?://", raw, re.I):
+        raw = "https://" + raw
+    parsed = urlparse(raw)
+    if not parsed.netloc:
+        return f"I could not read the address {site}"
+    started = time.time()
+    try:
+        response = requests.get(raw, headers=UA, timeout=10, allow_redirects=True, stream=True)
+    except requests.RequestException:
+        return f"{parsed.netloc} is not responding"
+    elapsed = (time.time() - started) * 1000
+    code = response.status_code
+    response.close()
+    if 200 <= code < 400:
+        return f"{parsed.netloc} is up, HTTP {code}, answered in {round(elapsed)} milliseconds"
+    if 400 <= code < 500:
+        return f"{parsed.netloc} is reachable but returned HTTP {code}"
+    return f"{parsed.netloc} has a server problem, HTTP {code}"
+
+
+def github_repo(repo: str = "") -> str:
+    """Stars, forks, issues and language of a GitHub repository."""
+    raw = (repo or "").strip()
+    if not raw:
+        return "Tell me which repository, like python/cpython"
+    match = re.search(r"github\.com/([^/\s]+)/([^/\s#?]+)", raw, re.I)
+    if match:
+        owner, name = match.group(1), match.group(2)
+    elif "/" in raw:
+        owner, name = raw.split("/", 1)
+        name = name.split()[0]
+    else:
+        return "Tell me the repository as owner and name, like python/cpython"
+    name = name.removesuffix(".git")
+    data = _get(f"https://api.github.com/repos/{quote(owner)}/{quote(name)}",
+                headers={"Accept": "application/vnd.github+json"})
+    if not data:
+        return f"I could not find the GitHub repository {owner}/{name}"
+    full = data.get("full_name") or f"{owner}/{name}"
+    parts = [f"{full} has {_num(data.get('stargazers_count', 0))} stars "
+             f"and {_num(data.get('forks_count', 0))} forks"]
+    issues = data.get("open_issues_count")
+    if isinstance(issues, int):
+        parts.append(f"{_num(issues)} open issues")
+    parts.append(f"mainly {data.get('language') or 'no single language'}")
+    description = (data.get("description") or "").strip().rstrip(".")
+    if description:
+        parts.append(description)
+    pushed = data.get("pushed_at")
+    if pushed:
+        try:
+            stamp = datetime.fromisoformat(pushed.replace("Z", "+00:00")).timestamp()
+            parts.append(f"last push {_time_ago(stamp)}")
+        except (ValueError, OverflowError):
+            pass
+    return ", ".join(parts)
+
+
+def _pypi_info(name: str):
+    data = _get(f"https://pypi.org/pypi/{quote(name)}/json")
+    info = (data or {}).get("info") or {}
+    version = info.get("version")
+    if not version:
+        return None
+    text = f"the Python package {info.get('name') or name} is at version {version}"
+    summary = (info.get("summary") or "").strip().rstrip(".")
+    author = (info.get("author") or "").strip()
+    if summary:
+        text += f", {summary}"
+    if author:
+        text += f", by {author}"
+    return text
+
+
+def _npm_info(name: str, quiet: bool = False):
+    data = _get(f"https://registry.npmjs.org/{quote(name, safe='@')}/latest")
+    version = (data or {}).get("version")
+    if not version:
+        return None if quiet else f"I could not find the npm package {name}"
+    text = f"the npm package {data.get('name') or name} is at version {version}"
+    description = (data.get("description") or "").strip().rstrip(".")
+    license_ = (data.get("license") or "").strip()
+    if description:
+        text += f", {description}"
+    if license_:
+        text += f", license {license_}"
+    return text
+
+
+def package_info(name: str = "", ecosystem: str = "pypi") -> str:
+    """Latest version and summary of a Python or JavaScript package."""
+    package = (name or "").strip()
+    if not package:
+        return "Tell me which package"
+    low = (ecosystem or "pypi").lower()
+    if low.startswith(("npm", "node", "javascript", "js")):
+        return _npm_info(package)
+    return _pypi_info(package) or _npm_info(package, quiet=True) \
+        or f"I could not find a package called {package}"
+
+
+def cocktail_recipe(drink: str = "", part: str = "overview") -> str:
+    """A cocktail recipe: overview, ingredients, or the steps."""
+    name = (drink or "").strip()
+    data = _get("https://www.thecocktaildb.com/api/json/v1/1/" + ("search.php" if name else "random.php"),
+                {"s": name} if name else None)
+    drinks = (data or {}).get("drinks") or []
+    if not drinks:
+        return f"I could not find a cocktail called {name}" if name else "Sorry, I could not get a cocktail"
+    item = drinks[0]
+    ingredients = []
+    for i in range(1, 16):
+        ingredient = (item.get(f"strIngredient{i}") or "").strip()
+        if ingredient:
+            measure = (item.get(f"strMeasure{i}") or "").strip()
+            ingredients.append(f"{measure} {ingredient}".strip())
+    title = item.get("strDrink") or name or "this cocktail"
+    instructions = (item.get("strInstructions") or "").strip()
+    low = (part or "overview").lower()
+    if low.startswith("ingr"):
+        return f"for a {title} you need " + "; ".join(ingredients)
+    if low.startswith(("step", "method", "instr", "how", "direction")):
+        steps = [s.strip() for s in re.split(r"(?<=[.!?])\s+|\r?\n+", instructions) if len(s.strip()) > 3]
+        listed = " ".join(f"Step {i + 1}: {s.rstrip('.')}." for i, s in enumerate(steps[:6]))
+        return f"{title}. {listed}" if listed else f"I have no instructions for a {title}"
+    kind = " ".join(x for x in (item.get("strCategory"), item.get("strAlcoholic"), item.get("strGlass")) if x)
+    first = _first_sentences(instructions, 2, 300)
+    return f"{title}, {kind}. You need {_join(ingredients[:8])}." + (f" {first}" if first else "")
+
+
+def book_search(query: str = "", detail: str = "short") -> str:
+    """Find a book and say who wrote it and what it is about."""
+    query = (query or "").strip()
+    if not query:
+        return "Tell me which book or author"
+    data = _get("https://openlibrary.org/search.json",
+                {"q": query, "limit": 1,
+                 "fields": "title,author_name,first_publish_year,subject,edition_count"})
+    docs = (data or {}).get("docs") or []
+    if not docs:
+        return f"I could not find a book matching {query}"
+    book = docs[0]
+    title = book.get("title") or query.title()
+    authors = ", ".join((book.get("author_name") or [])[:3]) or "an unknown author"
+    year = book.get("first_publish_year")
+    text = f"{title} by {authors}"
+    if year:
+        text += f", first published in {year}"
+    subjects = [s for s in (book.get("subject") or []) if s and len(s) < 30][:5]
+    if subjects:
+        text += f". It is about {_join(subjects)}"
+    if str(detail or "").lower().startswith(("l", "d", "m", "f")):
+        editions = book.get("edition_count")
+        if editions:
+            text += f". There are {_num(editions)} editions"
+    return text
+
+
+def music_artist(name: str = "") -> str:
+    """Country, active years and style of a music artist or band."""
+    artist = (name or "").strip()
+    if not artist:
+        return "Tell me which artist or band"
+    data = _get("https://musicbrainz.org/ws/2/artist/",
+                {"query": f'artist:"{artist}"', "fmt": "json", "limit": 1},
+                headers={"Accept": "application/json"})
+    artists = (data or {}).get("artists") or []
+    if not artists:
+        return f"I could not find an artist called {artist}"
+    item = artists[0]
+    display = item.get("name") or artist
+    kind = (item.get("type") or "artist").lower()
+    area = (item.get("area") or {}).get("name") or item.get("country") or ""
+    life = item.get("life-span") or {}
+    begin, end = life.get("begin"), life.get("end")
+    text = f"{display} is a {kind}"
+    if area:
+        text += f" from {area}"
+    if kind == "person":
+        if begin and end:
+            text += f", lived from {begin[:4]} to {end[:4]}"
+        elif begin:
+            text += f", born in {begin[:4]}"
+    elif begin and end:
+        text += f", active from {begin[:4]} to {end[:4]}"
+    elif begin:
+        text += f", active since {begin[:4]}"
+    tags = [t.get("name") for t in (item.get("tags") or []) if t.get("name")][:3]
+    if tags:
+        text += f", known for {_join(tags)}"
+    return text
+
+
+_ANILIST_QUERY = (
+    "query ($search: String) { Media(search: $search, type: ANIME) { "
+    "title { english romaji } startDate { year } episodes averageScore "
+    "description(asHtml: false) } }"
+)
+
+
+def anime_info(title: str = "") -> str:
+    """Year, episode count, rating and synopsis of an anime."""
+    title = (title or "").strip()
+    if not title:
+        return "Tell me which anime"
+    data = _post_json("https://graphql.anilist.co",
+                      {"query": _ANILIST_QUERY, "variables": {"search": title}})
+    media = ((data or {}).get("data") or {}).get("Media")
+    if not media:
+        return f"I could not find an anime called {title}"
+    titles = media.get("title") or {}
+    name = titles.get("english") or titles.get("romaji") or title
+    year = (media.get("startDate") or {}).get("year")
+    text = name
+    if year:
+        text += f", from {year}"
+    episodes = media.get("episodes")
+    if isinstance(episodes, int):
+        text += f", {_num(episodes)} episodes"
+    score = media.get("averageScore")
+    if isinstance(score, (int, float)):
+        text += f", rated {score / 10:.1f} out of 10"
+    synopsis = re.sub(r"\(Source:.*$", "", _clean_html(media.get("description") or ""),
+                      flags=re.I | re.S).strip()
+    if synopsis:
+        text += f". {_first_sentences(synopsis, 2, 350)}"
+    return text
+
+
+def pokemon_info(name: str = "") -> str:
+    """Type, size, abilities and a short Pokedex description of a Pokemon."""
+    pokemon = re.sub(r"[^a-z0-9-]+", "-", (name or "").strip().lower()).strip("-")
+    if not pokemon:
+        return "Tell me which Pokemon"
+    data = _get(f"https://pokeapi.co/api/v2/pokemon/{quote(pokemon)}")
+    if not data:
+        return f"I could not find a Pokemon called {name}"
+    species = _get(f"https://pokeapi.co/api/v2/pokemon-species/{quote(pokemon)}") or {}
+    display = (species.get("name") or data.get("name") or name).replace("-", " ").title()
+    types = [t.get("type", {}).get("name") for t in (data.get("types") or []) if t.get("type")]
+    abilities = [a.get("ability", {}).get("name", "").replace("-", " ")
+                 for a in (data.get("abilities") or []) if a.get("ability")]
+    parts = [f"{display} is a {' and '.join(types) if types else 'unknown'} type"]
+    height = data.get("height")
+    weight = data.get("weight")
+    if isinstance(height, (int, float)):
+        parts.append(f"{height / 10:g} meters tall")
+    if isinstance(weight, (int, float)):
+        parts.append(f"{weight / 10:g} kilograms")
+    if abilities:
+        parts.append(f"abilities {_join(abilities[:3])}")
+    flavor = ""
+    for entry in species.get("flavor_text_entries") or []:
+        if (entry.get("language") or {}).get("name") == "en":
+            flavor = _clean_html(entry.get("flavor_text") or "")
+            break
+    if flavor:
+        parts.append(_first_sentences(flavor, 1, 200))
+    return ", ".join(parts)
+
+
+_NUMBER_FACTS = [
+    "forty two is the answer to life, the universe and everything",
+    "a million seconds is about eleven and a half days",
+    "zero is the only number that cannot be represented in Roman numerals",
+    "twelve is the smallest number with exactly six divisors",
+    "one hundred and eleven million one hundred and eleven thousand one hundred and eleven is a perfect square",
+]
+
+
+def _local_number_fact(raw: str) -> str:
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        try:
+            value = int(float(raw))
+        except (TypeError, ValueError):
+            return random.choice(_NUMBER_FACTS)
+    if value == 0:
+        return "zero is neither positive nor negative"
+    properties = []
+    if value < 0:
+        properties.append("negative")
+    properties.append("even" if value % 2 == 0 else "odd")
+    small = 1 < value <= 10_000_000      # keep the checks quick for huge numbers
+    if small and all(value % i for i in range(2, math.isqrt(value) + 1)):
+        properties.append("prime")
+    if value > 0:
+        root = math.isqrt(value)
+        if root * root == value:
+            properties.append(f"a perfect square, {root} squared")
+        if small:
+            divisors = sum(1 for i in range(1, math.isqrt(value) + 1) if value % i == 0) * 2
+            if root * root == value:
+                divisors -= 1
+            properties.append(f"has {divisors} divisors")
+    text = f"{value} is " + _join(properties)
+    special = {
+        42: "it is the answer to life, the universe and everything",
+        7: "there are seven days in a week",
+        12: "there are twelve months in a year",
+        13: "some people call it an unlucky number",
+        100: "it is ten squared",
+        365: "there are about 365 days in a year",
+    }.get(value)
+    return f"{text}. {special[:1].upper()}{special[1:]}" if special else text
+
+
+def number_fact(number: str = "") -> str:
+    """A fun fact about a number, or a random number fact."""
+    raw = re.sub(r"[^0-9.-]", "", str(number or ""))
+    return _local_number_fact(raw) if raw else random.choice(_NUMBER_FACTS)
+
+
+_CAT_FACTS = [
+    "cats have five toes on their front paws and four on their back paws",
+    "a group of cats is called a clowder",
+    "cats cannot taste sweetness",
+    "cats spend about seventy percent of their lives asleep",
+    "a cat's nose print is unique, like a fingerprint",
+]
+
+
+def cat_fact() -> str:
+    """A random fact about cats."""
+    data = _get("https://catfact.ninja/fact")
+    fact = (data or {}).get("fact")
+    return (fact or random.choice(_CAT_FACTS)).strip().rstrip(".")
+
+
+def random_wikipedia() -> str:
+    """A summary of a random Wikipedia article."""
+    data = _get("https://en.wikipedia.org/api/rest_v1/page/random/summary")
+    if not data or not data.get("extract"):
+        return "Sorry, I could not find a random article"
+    title = data.get("title") or "this article"
+    text = _first_sentences(re.sub(r"\s*\([^)]*\)", "", data["extract"]), 2, 400)
+    return f"{title}. {text}".strip()
+
+
+_POLLEN_NAMES = {
+    "alder_pollen": "alder", "birch_pollen": "birch", "grass_pollen": "grass",
+    "mugwort_pollen": "mugwort", "olive_pollen": "olive", "ragweed_pollen": "ragweed",
+}
+
+
+def _pollen_values(place: dict) -> list:
+    keys = ",".join(_POLLEN_NAMES)
+    params = {"latitude": place["latitude"], "longitude": place["longitude"],
+              "current": keys, "timezone": "auto"}
+    current = (_get("https://air-quality-api.open-meteo.com/v1/air-quality", params) or {}).get("current") or {}
+    values = [(label, current.get(key)) for key, label in _POLLEN_NAMES.items()
+              if isinstance(current.get(key), (int, float))]
+    if values:
+        return values
+    hourly = (_get("https://air-quality-api.open-meteo.com/v1/air-quality",
+                   {"latitude": place["latitude"], "longitude": place["longitude"],
+                    "hourly": keys, "forecast_days": 1, "timezone": "auto"}) or {}).get("hourly") or {}
+    for key, label in _POLLEN_NAMES.items():
+        numbers = [x for x in (hourly.get(key) or []) if isinstance(x, (int, float))]
+        if numbers:
+            values.append((label, numbers[0]))
+    return values
+
+
+def get_pollen(location: str = "") -> str:
+    """Pollen levels for trees, grass and weeds."""
+    place = _geocode(location)
+    if not place:
+        return _no_place(location)
+    values = _pollen_values(place)
+    if not values:
+        return "Sorry, I could not get the pollen levels there"
+    name = place.get("name") or "your area"
+    high = max(values, key=lambda item: item[1])
+    if high[1] < 1:
+        return f"pollen levels are low in {name}"
+    listed = ", ".join(f"{label} {round(value)}" for label, value in values if value >= 1)
+    return f"pollen in {name}: {listed} grains per cubic meter, highest is {high[0]}"
+
+
+# ---- handy calculators -------------------------------------------------------
+def _weight_kg(text: str):
+    low = str(text or "").lower()
+    value = _amount(low)
+    if value is None:
+        return None
+    if re.search(r"\b(lb|lbs|pound|pounds)\b", low):
+        return value * 0.45359237
+    if re.search(r"\b(st|stone|stones)\b", low):
+        return value * 6.35029318
+    return value
+
+
+def _height_meters(text: str):
+    low = str(text or "").lower()
+    feet = re.search(r"(\d+(?:\.\d+)?)\s*(?:ft|feet|foot|')", low)
+    inches = re.search(r"(\d+(?:\.\d+)?)\s*(?:in|inch|inches|\")", low)
+    if feet:
+        total = float(feet.group(1)) * 12 + (float(inches.group(1)) if inches else 0)
+        return total * 0.0254
+    value = _amount(low)
+    if value is None:
+        return None
+    if re.search(r"\b(cm|centimeter|centimeters)\b", low):
+        return value / 100
+    if re.search(r"\b(in|inch|inches)\b|\"", low):
+        return value * 0.0254
+    return value / 100 if value > 3 else value
+
+
+def bmi(weight: str = "", height: str = "", units: str = "metric") -> str:
+    """Body mass index from weight and height, with the category."""
+    low = (units or "").lower()
+    imperial = any(word in low for word in ("imperial", "pound", "lb", "inch", "feet", "ft"))
+    if not imperial:
+        imperial = bool(re.search(r"\b(lbs?|pounds?|inches?|feet|ft)\b",
+                                 f"{weight} {height}".lower()))
+    if imperial:
+        if not re.search(r"\b(lb|lbs|pound|pounds|kg|kilo|stone)\b", str(weight).lower()):
+            weight = f"{weight} pounds"
+        if not re.search(r"\b(cm|centimeter|meters?|m|ft|feet|foot|in|inch|inches)\b", str(height).lower()):
+            height = f"{height} inches"
+    kg, meters = _weight_kg(weight), _height_meters(height)
+    if kg is None or meters is None or kg <= 0 or meters <= 0:
+        return "Tell me your weight and height, for example 80 kilos and 180 centimeters"
+    if not 0.5 <= meters <= 2.5:
+        return "That height does not look right, tell me centimeters or meters"
+    value = kg / (meters ** 2)
+    if value < 18.5:
+        label = "underweight"
+    elif value < 25:
+        label = "a healthy weight"
+    elif value < 30:
+        label = "overweight"
+    else:
+        label = "obese"
+    return f"your body mass index is {_short(value)}, which is {label}"
+
+
+def daily_calories(weight: str = "", height: str = "", age: str = "", sex: str = "female",
+                   activity: str = "moderate", units: str = "metric") -> str:
+    """Estimated daily calories from weight, height, age, sex and activity."""
+    unit_low = (units or "").lower()
+    imperial = any(word in unit_low for word in ("imperial", "pound", "lb", "inch", "feet", "ft"))
+    if not imperial:
+        imperial = bool(re.search(r"\b(lbs?|pounds?|inches?|feet|ft)\b",
+                                 f"{weight} {height}".lower()))
+    if imperial:
+        if not re.search(r"\b(lb|lbs|pound|pounds|kg|kilo|stone)\b", str(weight).lower()):
+            weight = f"{weight} pounds"
+        if not re.search(r"\b(cm|centimeter|meters?|m|ft|feet|foot|in|inch|inches)\b", str(height).lower()):
+            height = f"{height} inches"
+    kg, meters = _weight_kg(weight), _height_meters(height)
+    years = _amount(age)
+    if kg is None or meters is None or years is None or kg <= 0 or meters <= 0 or years <= 0:
+        return "Tell me your weight, height and age, for example 80 kilos, 180 centimeters and 30 years"
+    if not 0.5 <= meters <= 2.5:
+        return "That height does not look right, tell me centimeters or meters, or say imperial"
+    male = str(sex or "").lower().startswith(("m", "man", "male", "boy"))
+    bmr = 10 * kg + 6.25 * (meters * 100) - 5 * years + (5 if male else -161)
+    low = (activity or "moderate").lower()
+    factor, label = 1.55, "moderate"
+    for key, value, name in (("very active", 1.9, "very active"), ("extra", 1.9, "very active"),
+                             ("sedentary", 1.2, "sedentary"), ("light", 1.375, "light"),
+                             ("moderate", 1.55, "moderate"), ("active", 1.725, "active")):
+        if key in low:
+            factor, label = value, name
+            break
+    assumed = "" if str(sex or "").strip() else ", assuming female"
+    return (f"your basal metabolic rate is about {_num(round(bmr))} calories, and with "
+            f"{label} activity you need about {_num(round(bmr * factor))} a day{assumed}")
+
+
+def _distance_km(text: str):
+    low = " ".join(str(text or "").lower().replace(",", "").split())
+    if not low:
+        return None
+    if "half marathon" in low or "half-marathon" in low:
+        return 21.0975
+    if "marathon" in low:
+        return 42.195
+    if re.search(r"\b5\s*k\b|\b5k\b", low):
+        return 5.0
+    if re.search(r"\b10\s*k\b|\b10k\b", low):
+        return 10.0
+    value = _amount(low)
+    if value is None:
+        return None
+    if re.search(r"\b(miles?|mi)\b", low):
+        return value * 1.609344
+    return value
+
+
+def _time_seconds(text: str):
+    low = " ".join(str(text or "").lower().split())
+    if not low:
+        return None
+    match = re.fullmatch(r"(\d+):(\d{1,2})(?::(\d{2}))?", low)
+    if match:
+        if match.group(3) is not None:
+            return int(match.group(1)) * 3600 + int(match.group(2)) * 60 + int(match.group(3))
+        first, second = int(match.group(1)), int(match.group(2))
+        return first * 3600 + second * 60 if first <= 6 else first * 60 + second
+    seconds = parse_duration(low, bare_minutes=True)
+    return int(seconds) if seconds else None
+
+
+def pace_calculator(distance: str = "", time_text: str = "", unit: str = "km") -> str:
+    """Running pace and speed from a distance and a time."""
+    km = _distance_km(distance)
+    seconds = _time_seconds(time_text)
+    if not km or not seconds or km <= 0 or seconds <= 0:
+        return "Tell me the distance and the time, for example 10 kilometers in 50 minutes"
+    low = (unit or "km").lower()
+    if "mile" in low or "mi" in low:
+        pace_seconds = seconds / (km / 1.609344)
+        pace_unit = "mile"
+    else:
+        pace_seconds = seconds / km
+        pace_unit = "kilometer"
+    speed = km / (seconds / 3600)
+    return (f"{_num(round(km, 2))} kilometers in {say_duration(seconds, exact=True)} is "
+            f"{say_duration(pace_seconds, exact=True)} per {pace_unit}, about "
+            f"{_short(speed)} kilometers per hour")
+
+
+def fuel_cost(distance: str = "", consumption: str = "", price: str = "",
+              units: str = "metric") -> str:
+    """Fuel needed and cost for a trip."""
+    km = _distance_km(distance)
+    use = _amount(consumption)
+    cost = _amount(price)
+    if km is None or use is None or cost is None or km <= 0 or use <= 0 or cost <= 0:
+        return "Tell me the distance, the fuel use and the fuel price, for example 300 kilometers, 6.5 liters and 1.50"
+    low = (units or "").lower()
+    imperial = any(word in low for word in ("imperial", "gallon", "mpg", "mile"))
+    if not imperial:
+        imperial = bool(re.search(r"\b(mpg|gallons?|miles?)\b",
+                                  f"{distance} {consumption} {price}".lower()))
+    currency = _env("EXPENSE_CURRENCY")
+    suffix = f" {currency}" if currency else ""
+    if imperial:
+        miles = km / 1.609344
+        gallons = miles / use
+        return (f"that trip is about {_num(round(miles))} miles, needs about "
+                f"{_short(gallons)} gallons of fuel and costs about {_short(gallons * cost)}{suffix}")
+    liters = km * use / 100
+    return (f"that trip needs about {_short(liters)} liters of fuel and costs about "
+            f"{_short(liters * cost)}{suffix}")
+
 
 TOOLS = [
     {
@@ -2998,6 +3711,87 @@ _EXTRA_SPECS = [
     _tool("inspire_me", "A short inspiring quote. Use for 'motivate me', 'give me a quote', 'inspire me'."),
 ]
 
+_MORE_SPECS = [
+    _tool("get_earthquakes", "Recent notable earthquakes, magnitude 4.5 and up. Use for 'any earthquakes today', "
+          "'latest earthquakes', 'biggest earthquake this week'.",
+          {"period": _text("'day' normally, e.g. 'day'. Also 'week' or 'month'."),
+           "count": _text("How many, e.g. '3'. Up to 5.")}),
+    _tool("iss_location", "Where the International Space Station is right now. Use for 'where is the ISS', "
+          "'where is the space station', 'what is the ISS flying over'."),
+    _tool("country_info", "Facts about a country: capital, population and currency. Use for "
+          "'tell me about Japan', 'what is the capital of Brazil', 'population of Canada'.",
+          {"country": _text("Country name, e.g. 'Japan'.")}, ["country"]),
+    _tool("public_ip", "The user's public IP address. Use for 'what is my IP', 'what is my public IP address'."),
+    _tool("website_status", "Check whether a website is up and how fast it answers. Use for 'is github down', "
+          "'is example.com working', 'check my website'.",
+          {"site": _text("Website address, e.g. 'example.com'.")}, ["site"]),
+    _tool("github_repo", "Stats about a GitHub repository: stars, forks, issues and language. Use for "
+          "'how many stars does python have on github', 'tell me about the opencode repo'.",
+          {"repo": _text("Repository as owner and name, e.g. 'python/cpython'. A full GitHub URL also works.")},
+          ["repo"]),
+    _tool("package_info", "Latest version and summary of a Python or JavaScript package. Use for "
+          "'what is the latest version of requests', 'npm version of react'.",
+          {"name": _text("Package name, e.g. 'requests'. Also 'react'."),
+           "ecosystem": _text("'pypi' for Python, 'npm' for JavaScript, e.g. 'pypi'. Leave empty to try both.")},
+          ["name"]),
+    _tool("cocktail_recipe", "A cocktail recipe: ingredients and how to make it. Use for 'how do I make a margarita', "
+          "'recipe for mojito', 'give me a random cocktail'.",
+          {"drink": _text("The cocktail, e.g. 'margarita'. Leave empty for a random one."),
+           "part": _text("'overview' normally, e.g. 'overview'. Also 'ingredients' or 'steps'.")}),
+    _tool("book_search", "Find a book and say who wrote it and what it is about. Use for 'who wrote Dune', "
+          "'tell me about the book 1984', 'find a book by Isaac Asimov'.",
+          {"query": _text("Book title or author, e.g. 'Dune'."),
+           "detail": _text("'short' normally, e.g. 'short'. Use 'long' for more detail.")}, ["query"]),
+    _tool("music_artist", "Facts about a music artist or band: country, active years and style. Use for "
+          "'who is Nirvana', 'tell me about Dua Lipa', 'what kind of music does Radiohead make'.",
+          {"name": _text("Artist or band, e.g. 'Nirvana'.")}, ["name"]),
+    _tool("anime_info", "Find an anime and say its year, episode count, rating and what it is about. Use for "
+          "'tell me about Attack on Titan', 'what is One Piece about'.",
+          {"title": _text("Anime title, e.g. 'Attack on Titan'.")}, ["title"]),
+    _tool("pokemon_info", "Pokedex facts about a Pokemon: type, size, abilities and a short description. Use for "
+          "'tell me about Pikachu', 'what type is Charizard'.",
+          {"name": _text("Pokemon name, e.g. 'Pikachu'.")}, ["name"]),
+    _tool("number_fact", "A fun fact about a number, or a random number fact. Use for 'tell me a fact about 42', "
+          "'random number fact'.",
+          {"number": _text("The number, e.g. '42'. Leave empty for a random fact.")}),
+    _tool("cat_fact", "A random fact about cats. Use for 'tell me a cat fact', 'something about cats'."),
+    _tool("random_wikipedia", "A random Wikipedia article summary. Use for 'tell me something random', "
+          "'random Wikipedia article', 'surprise me with a fact'."),
+    _tool("get_pollen", "Pollen levels for trees, grass and weeds in a place. Use for 'how is the pollen today', "
+          "'is it bad for allergies', 'pollen count'.",
+          {"location": _text("City or place, e.g. 'Prague'. Leave empty for the home location.")}),
+    _tool("bmi", "Calculate body mass index from weight and height, with the category. Use for 'what is my BMI', "
+          "'BMI for 80 kilos and 180 centimeters'.",
+          {"weight": _text("Weight, e.g. '80'. Also '176 pounds'."),
+           "height": _text("Height, e.g. '180'. Also '5 feet 10 inches' or '1.8'."),
+           "units": _text("'metric' normally, e.g. 'metric'. Use 'imperial' for pounds and inches.")},
+          ["weight", "height"]),
+    _tool("daily_calories", "Estimate daily calories from weight, height, age, sex and activity. Use for "
+          "'how many calories should I eat', 'my daily calorie needs'.",
+          {"weight": _text("Weight, e.g. '80'."),
+           "height": _text("Height, e.g. '180'."),
+           "age": _text("Age in years, e.g. '30'."),
+           "sex": _text("'female' or 'male', e.g. 'female'."),
+           "activity": _text("'sedentary', 'light', 'moderate', 'active' or 'very active', e.g. 'moderate'."),
+           "units": _text("'metric' normally, e.g. 'metric'. Use 'imperial' for pounds and inches.")},
+          ["weight", "height", "age"]),
+    _tool("pace_calculator", "Running pace and speed from a distance and a time. Use for 'what pace is a 4 hour marathon', "
+          "'pace for 10 kilometers in 50 minutes', 'how fast is a 5k in 25 minutes'.",
+          {"distance": _text("Distance, e.g. '10 kilometers'. Also '5k', 'marathon', '26.2 miles'."),
+           "time_text": _text("Time, e.g. '50 minutes'. Also '4 hours', '3:30:00'."),
+           "unit": _text("'km' for pace per kilometer, e.g. 'km'. Use 'mile' for pace per mile.")},
+          ["distance", "time_text"]),
+    _tool("fuel_cost", "Fuel needed and cost for a trip. Use for 'how much fuel for 300 kilometers', "
+          "'trip cost for 200 miles at 30 mpg'.",
+          {"distance": _text("Distance, e.g. '300 kilometers'. Also '200 miles'."),
+           "consumption": _text("Fuel use, e.g. '6.5' liters per 100 kilometers. Also '30 mpg'."),
+           "price": _text("Fuel price per liter or gallon, e.g. '1.50'."),
+           "units": _text("'metric' normally, e.g. 'metric'. Use 'imperial' for miles, gallons and mpg.")},
+          ["distance", "consumption", "price"]),
+]
+
+_EXTRA_SPECS.extend(_MORE_SPECS)
+
 
 _DISABLED = {n.strip().lower() for n in _env("DISABLED_TOOLS").split(",") if n.strip()}
 TOOLS.extend(s for s in _EXTRA_SPECS if s["function"]["name"] not in _DISABLED)
@@ -3036,6 +3830,16 @@ _EXTRA_FUNCS = {
     "inspire_me": inspire_me,
 }
 
+_EXTRA_FUNCS.update({
+    "get_earthquakes": get_earthquakes, "iss_location": iss_location, "country_info": country_info,
+    "public_ip": public_ip, "website_status": website_status, "github_repo": github_repo,
+    "package_info": package_info, "cocktail_recipe": cocktail_recipe, "book_search": book_search,
+    "music_artist": music_artist, "anime_info": anime_info, "pokemon_info": pokemon_info,
+    "number_fact": number_fact, "cat_fact": cat_fact, "random_wikipedia": random_wikipedia,
+    "get_pollen": get_pollen, "bmi": bmi, "daily_calories": daily_calories,
+    "pace_calculator": pace_calculator, "fuel_cost": fuel_cost,
+})
+
 TOOL_FUNCTIONS.update({n: f for n, f in _EXTRA_FUNCS.items() if n not in _DISABLED})
 
 # Tools that make no sense inside a scheduled automation (they are for live conversation).
@@ -3051,6 +3855,7 @@ _EXTRA_AUTOMATION_EXCLUDED = {
     "set_home_location", "tip_split", "date_math", "distance_between",
     "news_details", "trivia", "add_birthday", "remove_birthday", "log_expense", "undo_last_expense",
     "sleep_calculator", "magic_8ball", "word_finder", "recipe_search",
+    "bmi", "daily_calories", "pace_calculator", "fuel_cost",
 }
 AUTOMATION_EXCLUDED |= _EXTRA_AUTOMATION_EXCLUDED
 
