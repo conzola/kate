@@ -19,7 +19,7 @@ The time heavily depends on the LLM running. The model running with the fastest 
 We’re actively working to optimize performance and reduce latency to the following targets:
 
 - **PC (RTX 4060):** Approximately 1 second.
-- **ESP32:** Approximately 2–3 seconds.
+- **ESP32:** Approximately 0.8 seconds.
 
 These are target latency figures, and optimization is still ongoing.
 
@@ -30,7 +30,7 @@ These are target latency figures, and optimization is still ongoing.
 
 ### Goals:
 
-- **81/500 tools**
+- **100/500 tools**
 - **more coming soon**
 
 ## Requirements
