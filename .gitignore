@@ -1,11 +1,14 @@
+# Ignore files that contain sensitive information or are not needed for version control
 .env
 server.bat
-kate-env/
+.ruff_cache/
+.vscode/
 
 # Python
 __pycache__/
 *.py[cod]
 *.tmp
+kate-env/
 
 # Runtime state and recordings
 memory.json
