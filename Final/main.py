@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT))
 sys.path.append(str(ROOT / "Hey_Kate"))
 
-from ASR.main import asr
+from ASR.main import asr, warmup as warmup_asr
 from ASR.record import InterruptDetector, calibrate, get_speech_end_time
 from LLM.automatization import scheduler_loop
 from LLM.main import ask, reset_memory, split_continue
@@ -234,6 +234,8 @@ def _ask_and_speak(text: str):
 
 def main():
     calibrate()  # measure ambient noise once here; record.py reuses the cached threshold forever
+    print("Warming up speech recognition...")
+    warmup_asr()
     print("Warming up the voice...")
     warmup()  # first synthesis is slow (GPU kernel compilation); done here, not mid-conversation
     _ensure_output_stream(24000)

@@ -8,7 +8,7 @@ This repository contains an AI assistant that runs on your ESP32 and computer.
 
 - **LLM:** Uses [LM Studio](https://lmstudio.ai/) to run a local large language model (LLM).
 - **TTS (Text-to-Speech):** Uses `Kokoro-82M` for speech synthesis.
-- **ASR (Automatic Speech Recognition):** Uses `Qwen3-ASR-0.6B` for speech recognition.
+- **ASR (Automatic Speech Recognition):** Uses Faster-Whisper `small.en` with CTranslate2 GPU inference and beam search for better recognition accuracy.
 
 ### Performance and Latency
 
@@ -70,6 +70,10 @@ PyTorch's [official installer](https://pytorch.org/get-started/locally/) lists
 the available CUDA builds. Kate automatically falls back to CPU when CUDA is
 unavailable.
 
+English ASR defaults to Faster-Whisper `small.en` with GPU float16 or CPU int8,
+beam search, and startup warmup. Set `KATE_ASR_MODEL` to a larger Faster-Whisper
+model if you prefer more accuracy, or `base.en` if you need lower latency.
+
 4. Create a `.env` file in the project directory based on the `example-dotenv` file.
 
    **Weather API:** The weather tool requires an API key. You can get one from [WeatherAPI.com](https://www.weatherapi.com/). This provider is recommended, but you can use any other weather provider you prefer.
@@ -94,6 +98,10 @@ python ./Final/main.py
    ```bash
    python ./ESP/on-pc/server.py
    ```
+
+Every turn prints a latency line in the server console and in the ESP32 Serial
+Monitor, for example:
+`Latency: ASR 0.38s | LLM complete 0.28s | first audio after ASR 0.24s | total 0.61s`.
 
 For the fastest ESP32 response, diagnostic audio recording is off by default. Set
 `KATE_SAVE_RECORDINGS=1` to save each raw prompt, or `KATE_SAVE_DEBUG_WAV=1` to

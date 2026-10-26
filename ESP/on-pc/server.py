@@ -27,6 +27,8 @@ What the ESP32 does
 
 Every reply (also the empty 204 ones) carries "X-Volume: 0..100", the speaker volume
 the user asked for ("louder", "set the volume to 30"...). The ESP applies it before playing.
+A reply with audio also carries "X-Latency", the same timing line that is printed here,
+so the ESP32 Serial Monitor shows the ASR / LLM / first-audio breakdown too.
 """
 import asyncio
 import os
@@ -49,7 +51,7 @@ from starlette.concurrency import run_in_threadpool
 ROOT = Path(__file__).resolve().parents[2]  # .../kate, where ASR/, LLM/ and TTS/ live
 sys.path.append(str(ROOT))
 
-from ASR.main import model as asr_model            # the Qwen3-ASR model, loaded once
+from ASR.main import model as asr_model, warmup as warmup_asr
 from LLM.automatization import quick_command, scheduler_loop   # quick_command: 'delete all my news automations'
 from LLM.main import ask, reset_memory, split_continue
 from LLM.tools import effective_volume, timer_loop   # speaker volume + timers, reminders, alarms
@@ -86,8 +88,20 @@ _last_reply = None
 _last_prompt = None                  # Path of the newest saved prompt
 
 
-def reply_headers(keep_going: bool = False) -> dict:
-    return {"X-Continue": "1" if keep_going else "0", "X-Volume": str(effective_volume())}
+def reply_headers(keep_going: bool = False, latency: str | None = None) -> dict:
+    headers = {"X-Continue": "1" if keep_going else "0", "X-Volume": str(effective_volume())}
+    if latency:
+        headers["X-Latency"] = latency      # the ESP prints this line in its Serial Monitor
+    return headers
+
+
+def format_latency(timing: dict, first_audio: float | None = None) -> str:
+    """Same line as Final/main.py: ASR, LLM, first audio after ASR and the total."""
+    asr, llm = timing["asr"], timing["llm"]
+    if first_audio is None:
+        return f"ASR {asr:.2f}s | LLM complete {llm:.2f}s | no audio"
+    return (f"ASR {asr:.2f}s | LLM complete {llm:.2f}s | "
+            f"first audio after ASR {first_audio:.2f}s | total {asr + first_audio:.2f}s")
 
 
 def _normalize(text: str) -> str:
@@ -185,15 +199,17 @@ def decide(text: str):
 
 def process_turn(pcm: bytes):
     if len(pcm) < 2:                 # the ESP32 renewing its idle, pre-opened connection
-        return None, False
+        return None, False, None
     with _PIPE_LOCK:
         t0 = time.monotonic()
         text = transcribe(pcm)
         t1 = time.monotonic()
         print(f"You: {text!r}  ({len(pcm) / 2 / ESP_RATE:.1f}s of audio, ASR {t1 - t0:.2f}s)")
         reply, keep_going = decide(text)
-        print(f"Kate: {reply!r}  (LLM {time.monotonic() - t1:.2f}s, continue={keep_going})")
-    return reply, keep_going
+        t2 = time.monotonic()
+        print(f"Kate: {reply!r}  (LLM {t2 - t1:.2f}s, continue={keep_going})")
+    timing = {"t_asr_start": t0, "t_asr_done": t1, "asr": t1 - t0, "llm": t2 - t1}
+    return reply, keep_going, timing
 
 
 _chime_cache = None
@@ -214,19 +230,34 @@ def chime_pcm() -> bytes:
     return _chime_cache
 
 
+def tts_pcm_chunks(text: str):
+    """Each TTS chunk as 16-bit PCM, as soon as it is synthesized."""
+    for chunk, _sr in stream_generate_audio(text):
+        pcm = np.clip(np.asarray(chunk, dtype=np.float32), -1.0, 1.0)
+        yield (pcm * 32767.0).astype("<i2").tobytes()
+
+
+def _pull_first(gen):
+    """First item of a generator, or None when it is empty (StopIteration cannot cross threads)."""
+    try:
+        return next(gen)
+    except StopIteration:
+        return None
+
+
 def audio_stream(text: str, chime: bool = False):
     """WAV header, a little silence, an optional chime, then each TTS chunk as soon as it is synthesized."""
     yield wav_header(TTS_RATE)
     yield b"\x00\x00" * int(TTS_RATE * HEAD_PAD_SECONDS)
     if chime and CHIME_REPEATS > 0:
         yield chime_pcm()
-    for chunk, _sr in stream_generate_audio(text):
-        pcm = np.clip(np.asarray(chunk, dtype=np.float32), -1.0, 1.0)
-        yield (pcm * 32767.0).astype("<i2").tobytes()
+    yield from tts_pcm_chunks(text)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    print("Warming up speech recognition...")
+    await run_in_threadpool(warmup_asr)
     print("Warming up the voice...")
     await run_in_threadpool(warmup)
 
@@ -257,11 +288,33 @@ async def talk(request: Request):
     pcm = bytearray()
     async for chunk in request.stream():
         pcm.extend(chunk)
-    reply, keep_going = await run_in_threadpool(process_turn, bytes(pcm))
-    headers = reply_headers(keep_going)    # built after the LLM ran, so a new volume is already in it
+    reply, keep_going, timing = await run_in_threadpool(process_turn, bytes(pcm))
     if not reply:
-        return Response(status_code=204, headers=headers)
-    return StreamingResponse(audio_stream(reply), media_type="audio/wav", headers=headers)
+        latency = format_latency(timing) if timing else None
+        if latency:
+            print(f"Latency: {latency}")
+        return Response(status_code=204, headers=reply_headers(keep_going, latency))
+
+    # Synthesize the first chunk BEFORE sending the headers: the response then starts with
+    # audio that is ready, and the complete latency line can travel in X-Latency.
+    chunks = tts_pcm_chunks(reply)
+    first = await run_in_threadpool(_pull_first, chunks)
+    if first is None:
+        latency = format_latency(timing)
+        print(f"Latency: {latency}")
+        return Response(status_code=204, headers=reply_headers(keep_going, latency))
+
+    latency = format_latency(timing, time.monotonic() - timing["t_asr_done"])
+    print(f"Latency: {latency}")
+    headers = reply_headers(keep_going, latency)   # built after the LLM ran, so a new volume is already in it
+
+    def stream():
+        yield wav_header(TTS_RATE)
+        yield b"\x00\x00" * int(TTS_RATE * HEAD_PAD_SECONDS)
+        yield first
+        yield from chunks
+
+    return StreamingResponse(stream(), media_type="audio/wav", headers=headers)
 
 
 @app.get("/announce")

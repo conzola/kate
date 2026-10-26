@@ -441,14 +441,16 @@ static bool hdrChunked = false;
 static long hdrContentLength = -1;     // -1 = unknown (read until the server closes)
 static bool hdrKeepGoing = false;      // X-Continue: 1 -> Kate asked a question, keep listening
 static int  hdrVolume = -1;            // X-Volume: 0..100 -> the volume the user asked for (-1 = not sent)
+static String hdrLatency = "";         // X-Latency: ASR / LLM / first audio / total, measured on the PC
 
 bool readHeaders() {
   hdrStatus = 0; hdrChunked = false; hdrContentLength = -1; hdrKeepGoing = false; hdrVolume = -1;
+  hdrLatency = "";
   bool first = true;
   while (true) {
     String line;
     while (true) {
-      int c = readByteTimeout(first ? 60000 : 5000);   // first byte waits for ASR + LLM
+      int c = readByteTimeout(first ? 60000 : 5000);   // first byte waits for ASR + LLM + first TTS chunk
       if (c < 0) return false;
       if (c == '\n') break;
       if (c != '\r') line += (char)c;
@@ -459,11 +461,13 @@ bool readHeaders() {
       continue;
     }
     if (line.length() == 0) return true;               // blank line = end of headers
+    String raw = line;                                 // keep the case: X-Latency is printed as sent
     line.toLowerCase();
     if (line.startsWith("transfer-encoding:") && line.indexOf("chunked") >= 0) hdrChunked = true;
     else if (line.startsWith("content-length:")) hdrContentLength = line.substring(15).toInt();
     else if (line.startsWith("x-continue:")) hdrKeepGoing = line.indexOf('1') >= 0;
     else if (line.startsWith("x-volume:")) hdrVolume = constrain((int)line.substring(9).toInt(), 0, 100);
+    else if (line.startsWith("x-latency:")) { hdrLatency = raw.substring(10); hdrLatency.trim(); }
   }
 }
 
@@ -501,7 +505,9 @@ int bodyRead(uint8_t* buf, int want) {
 
 // Call once the request is completely sent. Plays the reply while it streams in.
 // Returns true when Kate asked a question and wants you to answer without the wake word.
-bool receiveAndPlayReply() {
+// measureLatency: print how long the reply took (true for a real prompt, false for announcements).
+bool receiveAndPlayReply(bool measureLatency) {
+  unsigned long t_start = millis();
   if (!readHeaders()) {
     Serial.println("No reply from server");
     cur->stop();
@@ -510,6 +516,11 @@ bool receiveAndPlayReply() {
   if (hdrVolume >= 0 && hdrVolume != volume) {          // the server owns the volume (voice command), also on 204 replies
     volume = hdrVolume;
     Serial.printf("volume = %d (from server)\n", volume);
+  }
+  if (hdrLatency.length() > 0) {                        // the PC measured ASR / LLM / TTS for this turn
+    Serial.printf("Latency: %s", hdrLatency.c_str());
+    if (measureLatency) Serial.printf("  (%.2f s from upload to first audio)", (millis() - t_start) / 1000.0f);
+    Serial.println();
   }
   if (hdrStatus != 200) {                               // 204 = nothing to say
     Serial.printf("Server: %d (no audio)\n", hdrStatus);
@@ -581,7 +592,7 @@ bool serviceAnnouncements(unsigned long now) {
     cur = &pollClient;
     uint32_t before = playedSamples;
     playedSamples = 0;
-    receiveAndPlayReply();
+    receiveAndPlayReply(false);                     // announcements are not a measured turn
     bool played = playedSamples > 0;
     if (!played) playedSamples = before;
     pollClient.stop();
@@ -604,7 +615,7 @@ void refreshUpload() {
   if (client.connected()) {
     client.print("0\r\n\r\n");
     cur = &client;
-    receiveAndPlayReply();
+    receiveAndPlayReply(false);                     // idle-connection refresh, not a real prompt
   }
   client.stop();
   uploadReady = false;
@@ -730,7 +741,7 @@ void loop() {
       cur = &client;
       Serial.printf(">> recorded %lu ms%s, loudest rms %.0f (speech threshold %.0f), waiting for reply\n",
                     now - recStart, heardSpeech ? "" : " (no speech heard)", recMaxRms, curThr);
-      bool keepGoing = receiveAndPlayReply();
+      bool keepGoing = receiveAndPlayReply(true);
       state = LISTENING;
       afterPlayback();
       cooldownUntil = millis() + WAKE_COOLDOWN_MS;
