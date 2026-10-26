@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -13,11 +14,12 @@ except ImportError:  # run directly: python LLM/main.py
     from automatization import automation_prompt, resolve_automation_tags
 
 LM_URL = "http://127.0.0.1:1234/v1/chat/completions"
-MODEL = ""  # LM Studio uses whichever model is loaded; or put the exact model name here
+MODEL = os.getenv("KATE_LLM_MODEL", "qwen/qwen3-1.7b")
 DEFAULT_SYSTEM = """You are a voice assistant. Your replies are spoken aloud.
 
 STYLE
 - Short, friendly, plain answers. Talk like a normal person.
+- Usually answer in one sentence, under 20 words, unless the user asks for detail.
 - Answer directly. Never open with filler like "Sure" or "Here is what I can do".
 - No emoji, no asterisks, no brackets, no quotation marks.
 
@@ -70,6 +72,15 @@ LIVE_DATA_RE = re.compile(
     r"what('?s| is) the time|what time|current time|what day|today'?s date|what('?s| is) the date)\b",
     re.IGNORECASE,
 )
+_STREAM_UNSAFE_RE = re.compile(
+    r"\b(weather|forecast|headlines?|news|temperature|raining|snowing|"
+    r"time|date|remind(?:er)?|timer|alarm|automation|schedule|volume|"
+    r"calculate|compute|convert|currency|exchange rate|crypto|bitcoin|"
+    r"price|define|translate|wiki|PC status|computer status|stopwatch)\b",
+    re.IGNORECASE,
+)
+_TOOL_TAG_START_RE = re.compile(r"<\s*[a-z_][\w-]*(?=[\s;>,])", re.IGNORECASE)
+_STREAM_SENTENCE_RE = re.compile(r"(.+?[.!?])(?=\s|$)", re.DOTALL)
 RETRY_NUDGE = (
     "(Reminder: you cannot know live news, weather or the time yourself. Do not answer from "
     "memory. If the user wants it now, write the tool tag. If they want it scheduled, write "
@@ -78,6 +89,7 @@ RETRY_NUDGE = (
 
 _history: list = []
 _last_active = None
+_http = requests.Session()  # reuse the local LM Studio TCP connection between turns
 
 
 def _load() -> tuple:
@@ -157,17 +169,39 @@ def split_continue(text: str) -> tuple:
     return text, wants
 
 
-def _post(messages: list, temperature: float) -> dict:
+def _post(messages: list, temperature: float, on_content=None) -> dict:
     payload = {
         "model": MODEL,
         "messages": messages,
         "temperature": temperature,
-        "stream": False,
+        "max_tokens": 128,
+        "stream": on_content is not None,
         "reasoning_effort": "none"
     }
-    r = requests.post(LM_URL, json=payload, timeout=120)
-    r.raise_for_status()
-    return r.json()["choices"][0]["message"]
+    if on_content is None:
+        r = _http.post(LM_URL, json=payload, timeout=120)
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]
+
+    content = []
+    with _http.post(LM_URL, json=payload, timeout=120, stream=True) as r:
+        r.raise_for_status()
+        for line in r.iter_lines(decode_unicode=True):
+            if not line:
+                continue
+            if line.startswith("data:"):
+                line = line[5:].strip()
+            if line == "[DONE]":
+                break
+            try:
+                event = json.loads(line)
+                delta = event["choices"][0].get("delta", {}).get("content")
+            except (ValueError, KeyError, IndexError, TypeError):
+                continue
+            if isinstance(delta, str) and delta:
+                content.append(delta)
+                on_content(delta)
+    return {"content": "".join(content)}
 
 
 def _build_messages(system: str, nudge: str = "") -> list:
@@ -192,9 +226,9 @@ def _build_messages(system: str, nudge: str = "") -> list:
     return messages
 
 
-def _respond(messages: list, temperature: float) -> tuple:
+def _respond(messages: list, temperature: float, on_content=None) -> tuple:
     """One model call. Returns (raw_text, resolved_text, number_of_tags_resolved)."""
-    raw = strip_think(_post(messages, temperature).get("content") or "")
+    raw = strip_think(_post(messages, temperature, on_content=on_content).get("content") or "")
     # Automations first, tools second. Tool results (news headlines, for example) come
     # from the internet and are inserted last, so a headline can never smuggle in a
     # tag that gets executed, and a tool tag inside an automation is not run early.
@@ -203,15 +237,39 @@ def _respond(messages: list, temperature: float) -> tuple:
     return raw, text, automation_changes + tool_calls
 
 
-def ask(input: str, system: str = DEFAULT_SYSTEM, temperature: float = 0.7) -> str:
+def ask(input: str, system: str = DEFAULT_SYSTEM, temperature: float = 0.7, on_sentence=None) -> str:
     """Ask the LLM with the recent conversation as context, then resolve tool tags."""
     global _last_active
     now = time.time()
     if _last_active is not None and now - _last_active > MEMORY_TIMEOUT:
         reset_memory()
     _history.append({"role": "user", "content": input})
+    stream_enabled = on_sentence is not None and not _STREAM_UNSAFE_RE.search(input)
+    raw_stream = ""
+    visible_length = 0
+    pending_sentence = ""
+
+    def _on_content(delta: str) -> None:
+        nonlocal raw_stream, visible_length, pending_sentence
+        raw_stream += delta
+        visible = strip_think(raw_stream)
+        fresh = visible[visible_length:]
+        visible_length = len(visible)
+        pending_sentence += fresh
+        if _TOOL_TAG_START_RE.search(pending_sentence):
+            pending_sentence = ""
+            return
+        while match := _STREAM_SENTENCE_RE.search(pending_sentence):
+            sentence = match.group(1).strip()
+            pending_sentence = pending_sentence[match.end():].lstrip()
+            if sentence:
+                on_sentence(sentence)
+
     try:
-        raw, text, handled = _respond(_build_messages(system), temperature)
+        raw, text, handled = _respond(
+            _build_messages(system), temperature,
+            on_content=_on_content if stream_enabled else None,
+        )
         if not handled and LIVE_DATA_RE.search(input):
             # asked for live data but no tag: the reply is invented, so try once more
             raw, text, handled = _respond(_build_messages(system, RETRY_NUDGE), temperature)

@@ -29,6 +29,7 @@ Every reply (also the empty 204 ones) carries "X-Volume: 0..100", the speaker vo
 the user asked for ("louder", "set the volume to 30"...). The ESP applies it before playing.
 """
 import asyncio
+import os
 import queue
 import re
 import struct
@@ -63,7 +64,10 @@ HEAD_PAD_SECONDS = 0.15          # silence before the first word so the amp neve
 CHIME_REPEATS = 3                # how many times the timer chime rings before Kate speaks (0 = no chime)
 DEBUG_WAV = ROOT / "esp_last_recording.wav"   # the last prompt AFTER normalizing (what the ASR heard)
 RECORDINGS_DIR = ROOT / "esp_recordings"      # every prompt, exactly as the ESP sent it
-RECORDINGS_DIR.mkdir(exist_ok=True)
+SAVE_RECORDINGS = os.getenv("KATE_SAVE_RECORDINGS", "0").strip().lower() in {"1", "true", "yes"}
+SAVE_DEBUG_WAV = os.getenv("KATE_SAVE_DEBUG_WAV", "0").strip().lower() in {"1", "true", "yes"}
+if SAVE_RECORDINGS:
+    RECORDINGS_DIR.mkdir(exist_ok=True)
 LOG_FILE = ROOT / "conversation_log.txt"
 
 # same phrases as main.py
@@ -127,17 +131,19 @@ def save_prompt(pcm: bytes):
 
 
 def transcribe(pcm: bytes) -> str:
-    save_prompt(pcm)
+    if SAVE_RECORDINGS:
+        save_prompt(pcm)
     audio = np.frombuffer(pcm[: len(pcm) // 2 * 2], dtype="<i2").astype(np.float32) / 32768.0
     if audio.size < ESP_RATE * MIN_AUDIO_SECONDS:
         return ""
     peak = float(np.max(np.abs(audio)))
     if NORMALIZE and 0 < peak < TARGET_PEAK:
         audio = audio * min(TARGET_PEAK / peak, MAX_GAIN)
-    try:
-        sf.write(str(DEBUG_WAV), audio, ESP_RATE)
-    except Exception:
-        pass
+    if SAVE_DEBUG_WAV:
+        try:
+            sf.write(str(DEBUG_WAV), audio, ESP_RATE)
+        except Exception:
+            pass
     results = asr_model.transcribe(audio=(audio, ESP_RATE), language="English")
     return (results[0].text or "").strip()
 

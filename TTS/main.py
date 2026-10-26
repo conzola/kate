@@ -31,7 +31,7 @@ OUTPUT_WAV = "output_custom_voice.wav"
 
 # Local synthesis time grows with text length (no fixed server cost any more),
 # so keep the first chunk short and let later chunks be a bit longer.
-FIRST_CHUNK_WORDS = 10   # first chunk is cut at punctuation once it is longer than this
+FIRST_CHUNK_WORDS = 7    # keep the first spoken chunk short to start playback sooner
 MERGE_WORDS = 30         # merge short sentences into one chunk up to this many words
 MAX_WORDS = 30           # hard limit per chunk
 PREFETCH_WORKERS = 1     # chunk N+1 is synthesized while chunk N plays

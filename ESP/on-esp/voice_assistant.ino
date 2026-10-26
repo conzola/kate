@@ -49,7 +49,7 @@ const int   WAKE_COOLDOWN_MS   = 1500;
 
 // Recording after the wake word
 const int   NO_SPEECH_MS       = 4000;          // give up if you never speak
-const int   SILENCE_MS         = 900;           // stop after this much silence
+const int   SILENCE_MS         = 450;           // stop quickly after the user finishes
 const int   MAX_RECORD_MS      = 10000;
 
 // Announcements (timers, reminders, scheduled news...) are PUSHED by the server: the ESP keeps one request

@@ -12,7 +12,7 @@ import sounddevice as sd
 SAMPLE_RATE = 16000  # 16 kHz mono is what most ASR models expect
 CHUNK = 0.05         # seconds of audio handled per block
 NOISE_FLOOR_SECONDS = 0.5   # ambient calibration time before listening
-SILENCE_LIMIT = 0.7  # seconds of trailing silence that ends the utterance
+SILENCE_LIMIT = 0.35  # short trailing pause for quicker turn detection
 START_TIMEOUT = 10.0 # give up if nobody talks within this window
 MAX_DURATION = 15    # hard cap on a single recording (seconds)
 PREROLL = 0.3        # audio kept before speech onset so words aren't clipped

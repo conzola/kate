@@ -19,7 +19,7 @@
 
 # --- audio + models ---------------------------------------------------------
 numpy==2.5.2
-torch==2.14.1
+torch==2.11.0
 qwen-asr==0.0.6          # ASR/main.py: Qwen3-ASR-0.6B transcription
 kokoro==0.9.4            # TTS/main.py: Kokoro-82M speech synthesis
 pymicro-wakeword==2.5.0  # Hey_Kate/listen_kate.py: "Hey Kate" wake word on the PC
