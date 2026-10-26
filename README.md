@@ -2,6 +2,30 @@
 
 *Work in progress...*
 
+## General Information
+
+This repository contains an AI assistant that runs on your ESP32 and computer.
+
+- **LLM:** Uses [LM Studio](https://lmstudio.ai/) to run a local large language model (LLM).
+- **TTS (Text-to-Speech):** Uses `Kokoro-82M` for speech synthesis.
+- **ASR (Automatic Speech Recognition):** Uses `Qwen3-ASR-0.6B` for speech recognition.
+
+### Performance and Latency
+
+On an NVIDIA RTX 4060, `./Final/main.py` currently achieves approximately **2 seconds of latency**, with the best run getting **1.6 seconds of latency**. When running on the ESP32, latency is around **3–5 seconds**.
+
+We’re actively working to optimize performance and reduce latency to the following targets:
+
+- **PC (RTX 4060):** Approximately 1 second.
+- **ESP32:** Approximately 2–3 seconds.
+
+These are target latency figures, and optimization is still ongoing.
+
+### Hardware Requirements
+
+- **Recommended VRAM:** 8 GB.
+- **Larger LLMs:** More VRAM is recommended when running larger language models.
+
 ## Requirements
 
 - Python 3.12
