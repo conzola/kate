@@ -12,7 +12,7 @@ This repository contains an AI assistant that runs on your ESP32 and computer.
 
 ### Performance and Latency
 
-On an NVIDIA RTX 4060, `./Final/main.py` currently achieves approximately **2 seconds of latency**. When running on the ESP32, latency is around **3–5 seconds**.
+On an NVIDIA RTX 4060, `./Final/main.py` currently achieves approximately **2 seconds of latency**, with the best run getting **1.6 seconds of latency**. When running on the ESP32, latency is around **3–5 seconds**.
 
 We’re actively working to optimize performance and reduce latency to the following targets:
 
