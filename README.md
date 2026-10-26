@@ -33,7 +33,7 @@
    pip install -r requirements.txt
    ```
 
-4. Create a `.env` file in the project directory and configure your environment variables.
+4. Create a `.env` file in the project directory based on the `example-dotenv` file.
 
    **Weather API:** The weather tool requires an API key. You can get one from [WeatherAPI.com](https://www.weatherapi.com/). This provider is recommended, but you can use any other weather provider you prefer.
 
