@@ -2,6 +2,19 @@
 
 *Work in progress...*
 
+## General Information
+
+This repository contains an AI assistant that runs on your ESP32 and computer.
+
+- **LLM:** Uses [LM Studio](https://lmstudio.ai/) to run a local large language model (LLM).
+- **TTS (Text-to-Speech):** Uses `Kokoro-82M` for speech synthesis.
+- **ASR (Automatic Speech Recognition):** Uses `Qwen3-ASR-0.6B` for speech recognition.
+
+### Hardware Requirements
+
+- **Recommended VRAM:** 8 GB.
+- **Larger LLMs:** More VRAM is recommended when running larger language models.
+
 ## Requirements
 
 - Python 3.12
