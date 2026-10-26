@@ -2225,6 +2225,9 @@ def daily_briefing() -> str:
             and (_next_birthday(b["month"], b["day"], now.date()) - now.date()).days <= 7]
     for b in sorted(soon, key=lambda b: _next_birthday(b["month"], b["day"], now.date()))[:2]:
         parts.append(_birthday_line(b, now.date()))
+    today_events = sorted((e for e in _events(data) if e["date"] == now.date().isoformat()), key=lambda e: e.get("time") or "99")
+    if today_events:
+        parts.append("In your calendar today: " + _join([_event_line(e) for e in today_events]))
     todo = data["lists"].get("todo") or []
     if todo:
         parts.append(f"On your to do list: {_join(todo)}")
@@ -3417,6 +3420,457 @@ def fuel_cost(distance: str = "", consumption: str = "", price: str = "",
             f"{_short(liters * cost)}{suffix}")
 
 
+# =============================================================================
+# MORE TOOLS (3): calendar, habits, time zones, money maths, sports, smart home,
+# wake on lan, cooking timers, ingredients, nutrition, name days, workouts
+# =============================================================================
+def _when_parse(text: str, today: date = None):
+    """('tomorrow at 3 PM', 'Friday 18:30', 'October 30 at 9') -> (date or None, (hour, minute) or None)."""
+    today = today or date.today()
+    low = " ".join((text or "").lower().replace(",", " ").split())
+    at = None
+    m = (re.search(r"\b(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)\b", low) or re.search(r"\b(?:at\s+)?\d{1,2}:\d{2}\b", low)
+         or re.search(r"\bat\s+\d{1,2}\b", low))
+    if m:
+        at = _clock_time(m.group(0).replace("at", "").strip())
+        low = (low[:m.start()] + " " + low[m.end():]).strip()
+    low = re.sub(r"\b(on|the|at)\b", " ", low)
+    low = " ".join(low.split())
+    if not low or low == "today":
+        return today, at
+    day = next((i for i, w in enumerate(WEEKDAYS) if w.lower() in low), None)
+    if day is not None:
+        gap = (day - today.weekday()) % 7
+        now = datetime.now()
+        if gap == 0 and at and (at[0], at[1]) <= (now.hour, now.minute):
+            gap = 7
+        return today + timedelta(days=gap + (7 if "next" in low and gap < 7 and gap > 0 else 0)), at
+    m = re.search(r"in (\d+) (day|week)s?", low)
+    if m:
+        return today + timedelta(days=int(m.group(1)) * (7 if m.group(2) == "week" else 1)), at
+    return _parse_date(low, today), at
+
+
+def _events(data: dict) -> list:
+    return [e for e in data.get("events", []) if isinstance(e, dict) and e.get("title") and e.get("date")]
+
+
+def add_event(title: str = "", when: str = "") -> str:
+    """Put an appointment in the calendar."""
+    title = (title or "").strip()
+    d, at = _when_parse(when)
+    if not title:
+        return "Tell me what the event is"
+    if d is None:
+        return "Sorry, I did not understand when. Try tomorrow at 3 PM or October 30 at 6 PM"
+    if d < date.today():
+        return "That date is already in the past"
+    with _DATA_LOCK:
+        data = _data_load()
+        keep = [e for e in _events(data) if e["date"] >= (date.today() - timedelta(days=30)).isoformat()]
+        keep.append({"title": title, "date": d.isoformat(), "time": f"{at[0]:02d}:{at[1]:02d}" if at else ""})
+        data["events"] = keep
+        _data_save(data)
+    return f"Okay, {title} is in your calendar on {_fmt_date(d)}" + (f" at {_clock(*at)}" if at else "")
+
+
+def _event_line(e: dict) -> str:
+    h = e.get("time")
+    return f"{_clock(int(h[:2]), int(h[3:]))} {e['title']}" if h else e["title"]
+
+
+def get_events(day: str = "today") -> str:
+    """What is in the calendar today, tomorrow, on a day, or in the coming week."""
+    low = (day or "today").lower()
+    today = date.today()
+    with _DATA_LOCK:
+        events = _events(_data_load())
+    if re.search(r"week|coming|upcoming|next days|soon", low):
+        days = [today + timedelta(days=i) for i in range(7)]
+    else:
+        d, _ = _when_parse(low)
+        if d is None:
+            return "Sorry, I did not understand which day"
+        days = [d]
+    parts = []
+    for d in days:
+        todays = sorted((e for e in events if e["date"] == d.isoformat()), key=lambda e: e.get("time") or "99")
+        if todays:
+            name = "Today" if d == today else "Tomorrow" if d == today + timedelta(days=1) else WEEKDAYS[d.weekday()]
+            parts.append(f"{name}: " + _join([_event_line(e) for e in todays]))
+    if not parts:
+        return "You have nothing planned" + ("" if len(days) > 1 else " " + ("today" if days[0] == today else f"on {_fmt_date(days[0])}"))
+    return "; ".join(parts)
+
+
+def cancel_event(title: str = "") -> str:
+    """Delete the next calendar event whose title matches."""
+    words = [w for w in re.findall(r"\w+", (title or "").lower()) if len(w) > 2]
+    with _DATA_LOCK:
+        data = _data_load()
+        events = sorted(_events(data), key=lambda e: (e["date"], e.get("time") or ""))
+        hit = next((e for e in events if e["date"] >= date.today().isoformat() and words and any(w in e["title"].lower() for w in words)), None)
+        if not hit:
+            return f"I found no upcoming event called {title}" if title else "Tell me which event to cancel"
+        data["events"] = [e for e in _events(data) if e is not hit and e != hit]
+        _data_save(data)
+    return f"Okay, I removed {hit['title']} on {_fmt_date(date.fromisoformat(hit['date']))}"
+
+
+def log_habit(habit: str = "", amount: str = "1") -> str:
+    """Count something the user did: glasses of water, workouts, pages read."""
+    name = re.sub(r"^(a |an |the |some )?(glass(es)? of |cup(s)? of |bottle(s)? of )?", "", (habit or "").lower().strip()).strip()
+    value = _amount(amount) or 1
+    if not name:
+        return "Tell me what to count"
+    with _DATA_LOCK:
+        data = _data_load()
+        habits = data.get("habits") if isinstance(data.get("habits"), dict) else {}
+        habits.setdefault(name, []).append({"d": date.today().isoformat(), "n": value})
+        data["habits"] = habits
+        _data_save(data)
+        total = sum(x["n"] for x in habits[name] if x["d"] == date.today().isoformat())
+    return f"Logged. That is {_num(total)} for {name} today"
+
+
+def habit_stats(habit: str = "") -> str:
+    """Today, this week and the streak for a counted habit."""
+    with _DATA_LOCK:
+        habits = _data_load().get("habits") or {}
+    if not habits:
+        return "You have not counted anything yet"
+    low = (habit or "").lower().strip()
+    names = [n for n in habits if low and (low in n or n in low)] or ([] if low else list(habits))
+    if not names:
+        return f"I have not counted {habit} yet"
+    today, out = date.today(), []
+    for n in names[:3]:
+        by = {}
+        for x in habits[n]:
+            by[x["d"]] = by.get(x["d"], 0) + x["n"]
+        week = sum(v for d, v in by.items() if today - timedelta(days=6) <= date.fromisoformat(d) <= today)
+        streak, cursor = 0, today if today.isoformat() in by else today - timedelta(days=1)
+        while cursor.isoformat() in by:
+            streak, cursor = streak + 1, cursor - timedelta(days=1)
+        out.append(f"{n}: {_num(by.get(today.isoformat(), 0))} today, {_num(week)} in the last seven days, "
+                   f"{streak} {'day' if streak == 1 else 'days'} in a row")
+    return "; ".join(out)
+
+
+def _utc_offset(place: dict):
+    data = _get("https://api.open-meteo.com/v1/forecast", {"latitude": place["latitude"], "longitude": place["longitude"],
+                                                           "current": "temperature_2m", "timezone": "auto"})
+    return (data or {}).get("utc_offset_seconds")
+
+
+def convert_time(clock: str = "", from_place: str = "", to_place: str = "") -> str:
+    """What a clock time in one place is in another place (empty from_place = here)."""
+    at = _clock_time(clock)
+    if not at:
+        return "Tell me the time, like 3 PM"
+    a = _geocode(from_place) if (from_place or "").strip() else None
+    b = _geocode(to_place)
+    if (from_place or "").strip() and not a:
+        return _no_place(from_place)
+    if not b:
+        return _no_place(to_place)
+    off_a = time.localtime().tm_gmtoff if a is None else _utc_offset(a)
+    off_b = _utc_offset(b)
+    if off_a is None or off_b is None:
+        return "Sorry, I could not get the time zones"
+    minutes = at[0] * 60 + at[1] + round((off_b - off_a) / 60)
+    shift = "the same day" if 0 <= minutes < 1440 else "the next day" if minutes >= 1440 else "the day before"
+    there = _clock((minutes % 1440) // 60, minutes % 60)
+    return f"{_clock(*at)} {'here' if a is None else 'in ' + a['name']} is {there} in {b['name']}, {shift}"
+
+
+def compare_deals(price_a: str = "", amount_a: str = "", price_b: str = "", amount_b: str = "") -> str:
+    """Which of two offers is cheaper per unit (amounts may carry units like '500 g' and '1 kg')."""
+    pa, pb = _amount(price_a), _amount(price_b)
+    def qty(text):
+        n = _amount(text)
+        unit = _UNITS.get(_unit_key(re.sub(r"[\d.,\s]+", " ", str(text or "")).strip()))
+        return n, unit
+    (qa, ua), (qb, ub) = qty(amount_a), qty(amount_b)
+    if None in (pa, pb, qa, qb) or 0 in (qa, qb):
+        return "Tell me both prices and both amounts, like 40 for 500 grams and 70 for 1 kilogram"
+    if ua and ub and ua[0] == ub[0]:
+        ba, bb, label = qa * ua[1], qb * ub[1], ua[3]
+        base_a, base_b = pa / ba, pb / bb
+        scale = 1 / ua[1]            # price per one of the first unit
+        per_a, per_b = base_a * ua[1], base_b * ua[1]
+    else:
+        per_a, per_b, label = pa / qa, pb / qb, "unit"
+    for k in (1, 100, 1000):
+        if min(per_a, per_b) * k >= 1:
+            break
+    names = f"per {k} {label}" if k > 1 and label != "unit" else f"per {label[:-1] if label.endswith('s') and k == 1 else label}"
+    cheaper, dear = ("A", "B") if per_a <= per_b else ("B", "A")
+    gap = abs(per_a - per_b) / max(per_a, per_b) * 100
+    if gap < 0.5:
+        return "Both offers cost the same per unit"
+    return f"Offer {cheaper} is cheaper by {gap:.0f} percent: {_money(per_a * k)} against {_money(per_b * k)} {names}" if cheaper == "A" \
+        else f"Offer {cheaper} is cheaper by {gap:.0f} percent: {_money(per_b * k)} against {_money(per_a * k)} {names}"
+
+
+def _years(text: str):
+    n = _amount(text)
+    if n is None:
+        return None
+    return n / 12 if re.search(r"month", str(text).lower()) else n
+
+
+def loan_payment(amount: str = "", rate: str = "", years: str = "") -> str:
+    """Monthly payment, total cost and interest of a loan or mortgage."""
+    p, r, y = _amount(amount), _amount(rate), _years(years)
+    if not p or r is None or not y:
+        return "Tell me the amount, the yearly interest rate and the number of years"
+    n, m = round(y * 12), r / 1200
+    pay = p / n if m == 0 else p * m / (1 - (1 + m) ** -n)
+    return (f"the monthly payment is about {_money(pay)}, you pay {_money(pay * n)} in total, "
+            f"of which {_money(pay * n - p)} is interest")
+
+
+def compound_interest(amount: str = "", rate: str = "", years: str = "", monthly_deposit: str = "0") -> str:
+    """What savings grow to with yearly interest and optional monthly deposits."""
+    p, r, y, d = _amount(amount) or 0.0, _amount(rate), _years(years), _amount(monthly_deposit) or 0.0
+    if r is None or not y or (p == 0 and d == 0):
+        return "Tell me the starting amount, the yearly interest rate and the number of years"
+    n, m = round(y * 12), r / 1200
+    growth = (1 + m) ** n
+    final = p * growth + (d * n if m == 0 else d * (growth - 1) / m)
+    put_in = p + d * n
+    return f"after {_num(y)} years you would have about {_money(final)}, of which {_money(final - put_in)} is interest on {_money(put_in)} put in"
+
+
+def vat_calculator(amount: str = "", rate: str = "", mode: str = "add") -> str:
+    """Add VAT to a net price or take it out of a gross price."""
+    a = _amount(amount)
+    r = _amount(rate) if (rate or "").strip() else float(_env("DEFAULT_VAT", "21"))
+    if a is None:
+        return "Tell me the amount"
+    if re.search(r"remove|without|excl|net|out|gross|incl|with.?in|contain", (mode or "").lower()) and not re.search(r"^add|plus", (mode or "").lower()):
+        net = a / (1 + r / 100)
+        return f"{_money(a)} with {_num(r)} percent VAT is {_money(net)} without VAT, the VAT is {_money(a - net)}"
+    return f"{_money(a)} plus {_num(r)} percent VAT is {_money(a * (1 + r / 100))}, the VAT is {_money(a * r / 100)}"
+
+
+_LEAGUES = {"premier league": "soccer/eng.1", "english": "soccer/eng.1", "la liga": "soccer/esp.1", "spanish": "soccer/esp.1",
+            "bundesliga": "soccer/ger.1", "german": "soccer/ger.1", "serie a": "soccer/ita.1", "italian": "soccer/ita.1",
+            "ligue 1": "soccer/fra.1", "french": "soccer/fra.1", "champions league": "soccer/uefa.champions",
+            "europa league": "soccer/uefa.europa", "czech": "soccer/cze.1", "mls": "soccer/usa.1", "nba": "basketball/nba",
+            "wnba": "basketball/wnba", "nfl": "football/nfl", "nhl": "hockey/nhl", "mlb": "baseball/mlb"}
+
+
+_SPORT_STATUS = {"ft": "full time", "ht": "half time", "aet": "after extra time", "final": "final", "f/ot": "final after overtime"}
+
+
+def sports_scores(league: str = "", team: str = "") -> str:
+    """Today's scores for a league, or just a team's game."""
+    low = (league or "").lower().strip()
+    path = next((v for k, v in _LEAGUES.items() if k in low or (low and low in k)), None)
+    if not path:
+        return "Tell me the league, like Premier League, NBA, NHL or Champions League"
+    data = _get(f"https://site.api.espn.com/apis/site/v2/sports/{path}/scoreboard")
+    games = []
+    for ev in (data or {}).get("events", []):
+        try:
+            comp = ev["competitions"][0]
+            teams = sorted(comp["competitors"], key=lambda c: c.get("homeAway") != "home")
+            names = [c["team"]["displayName"] for c in teams]
+            status = ev["status"]["type"]
+            line = f"{names[0]} {teams[0].get('score', '')} against {names[1]} {teams[1].get('score', '')}".replace("  ", " ")
+            games.append((names, line + (f", {_SPORT_STATUS.get(status.get('shortDetail', '').strip().lower(), status.get('shortDetail', '').lower())}" if status.get("shortDetail") else "")))
+        except (KeyError, IndexError, TypeError):
+            continue
+    if (team or "").strip():
+        games = [g for g in games if any(team.lower() in n.lower() for n in g[0])]
+    if not games:
+        return (f"I found no game for {team} today" if team else f"No {league} games today") if data is not None else "Sorry, I could not get the scores"
+    return "; ".join(g[1] for g in games[:6])
+
+
+def _ha(method: str, path: str, body: dict = None):
+    base, token = _env("HA_URL").rstrip("/"), _env("HA_TOKEN")
+    if not base or not token:
+        return None, "The smart home is not set up. Add HA_URL and HA_TOKEN for Home Assistant to the dot env file"
+    try:
+        r = requests.request(method, base + path, json=body, timeout=8, headers={"Authorization": f"Bearer {token}"})
+    except requests.RequestException:
+        return None, "Sorry, I could not reach Home Assistant"
+    if r.status_code == 401:
+        return None, "Home Assistant refused my access token"
+    return (r.json() if r.status_code < 300 and r.content else None), "" if r.status_code < 300 else f"Home Assistant answered error {r.status_code}"
+
+
+_HA_DOMAINS = ("light", "switch", "fan", "cover", "lock", "climate", "media_player", "scene", "script", "input_boolean", "sensor", "binary_sensor", "vacuum")
+
+
+def _ha_find(device: str, states: list, domains=_HA_DOMAINS):
+    words = {w for w in re.findall(r"[a-z0-9]+", (device or "").lower()) if w not in ("the", "my", "light", "lights", "lamp") or len(re.findall(r"\w+", device)) == 1}
+    best, score = None, 0
+    for s in states:
+        if s["entity_id"].split(".")[0] not in domains:
+            continue
+        have = set(re.findall(r"[a-z0-9]+", f"{s.get('attributes', {}).get('friendly_name', '')} {s['entity_id']}".lower()))
+        hit = len(words & have)
+        if words and hit > score or (hit == score and best and hit and len(have) < len(set(re.findall(r'[a-z0-9]+', best['entity_id'])))):
+            best, score = s, hit
+    return best if score else None
+
+
+def smart_home(device: str = "", action: str = "toggle", value: str = "") -> str:
+    """Control a Home Assistant device: lights, switches, blinds, locks, scenes, thermostat."""
+    states, error = _ha("GET", "/api/states")
+    if error:
+        return error
+    found = _ha_find(device, states or [], _HA_DOMAINS[:10])
+    if not found:
+        return f"I could not find a device called {device}"
+    eid, domain = found["entity_id"], found["entity_id"].split(".")[0]
+    name = found.get("attributes", {}).get("friendly_name", eid)
+    act, body = (action or "toggle").lower(), {"entity_id": eid}
+    number = _amount(value) if (value or "").strip() else _amount(act)
+    if domain == "cover":
+        service = "open_cover" if re.search(r"open|up|raise", act) else "close_cover" if re.search(r"close|down|lower", act) else "stop_cover"
+    elif domain == "lock":
+        service = "unlock" if "unlock" in act else "lock"
+    elif domain in ("scene", "script"):
+        service = "turn_on"
+    elif domain == "climate" and number is not None:
+        service, body["temperature"] = "set_temperature", number
+    elif domain == "light" and number is not None and not re.search(r"\boff\b", act):
+        service, body["brightness_pct"] = "turn_on", max(1, min(100, int(number)))
+    else:
+        service = "turn_off" if re.search(r"\boff\b|stop|close|disable", act) else "turn_on" if re.search(r"\bon\b|start|enable|activate|open", act) else "toggle"
+    _, error = _ha("POST", f"/api/services/{domain}/{service}", body)
+    if error:
+        return error
+    done = {"turn_on": "is on", "turn_off": "is off", "toggle": "is toggled", "open_cover": "is opening", "close_cover": "is closing",
+            "stop_cover": "has stopped", "lock": "is locked", "unlock": "is unlocked", "set_temperature": f"is set to {_num(number or 0)} degrees"}
+    return f"Okay, {name} " + (done.get(service, "is done") if "brightness_pct" not in body else f"is at {body['brightness_pct']} percent")
+
+
+def home_status(device: str = "") -> str:
+    """State of a device or sensor, or which lights are on."""
+    states, error = _ha("GET", "/api/states")
+    if error:
+        return error
+    if not (device or "").strip():
+        on = [s["attributes"].get("friendly_name", s["entity_id"]) for s in states or []
+              if s["entity_id"].startswith("light.") and s["state"] == "on"]
+        return f"These lights are on: {_join(on[:8])}" if on else "All lights are off"
+    found = _ha_find(device, states or [])
+    if not found:
+        return f"I could not find a device called {device}"
+    attrs = found.get("attributes", {})
+    unit = attrs.get("unit_of_measurement", "")
+    return f"{attrs.get('friendly_name', found['entity_id'])} is {found['state']}{(' ' + unit) if unit else ''}"
+
+
+def wake_on_lan(device: str = "") -> str:
+    """Wake a computer on the network. Devices come from WOL_DEVICES=pc=AA:BB:CC:DD:EE:FF,nas=..."""
+    import socket
+    known = {}
+    for pair in _env("WOL_DEVICES").split(","):
+        if "=" in pair:
+            k, v = pair.split("=", 1)
+            known[k.strip().lower()] = re.sub(r"[^0-9a-fA-F]", "", v)
+    if not known:
+        return "No devices are set up. Add WOL_DEVICES like pc=AA:BB:CC:DD:EE:FF to the dot env file"
+    low = (device or "").lower().strip()
+    key = next((k for k in known if low and (k in low or low in k)), next(iter(known)) if len(known) == 1 and not low else None)
+    if not key or len(known[key]) != 12:
+        return f"I do not know that device, I know {_join(list(known))}"
+    packet = bytes.fromhex("FF" * 6 + known[key] * 16)
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            s.sendto(packet, (_env("WOL_BROADCAST", "255.255.255.255"), 9))
+    except OSError:
+        return "Sorry, I could not send the wake up signal"
+    return f"Okay, I sent the wake up signal to {key}"
+
+
+_COOK = [(("egg", "soft"), 6, "soft boiled egg"), (("egg", "medium"), 8, "medium boiled egg"), (("egg",), 10, "hard boiled egg"),
+         (("spaghetti",), 10, "spaghetti"), (("penne",), 11, "penne"), (("pasta",), 10, "pasta"), (("noodle",), 3, "noodles"),
+         (("rice", "brown"), 40, "brown rice"), (("rice",), 15, "rice"), (("couscous",), 5, "couscous"), (("quinoa",), 15, "quinoa"),
+         (("lentil",), 20, "lentils"), (("potato",), 20, "boiled potatoes"), (("dumpling",), 20, "dumplings"), (("broccoli",), 5, "broccoli"),
+         (("oat",), 5, "oatmeal"), (("pizza",), 12, "frozen pizza"), (("tea", "green"), 3, "green tea"), (("tea", "herbal"), 7, "herbal tea"),
+         (("tea", "fruit"), 7, "fruit tea"), (("tea",), 4, "tea"), (("coffee",), 4, "french press coffee"), (("steak",), 8, "steak")]
+
+
+def cook_timer(food: str = "", doneness: str = "") -> str:
+    """Start a timer with the usual cooking time for a food."""
+    text = f"{food} {doneness}".lower()
+    for words, minutes, label in _COOK:
+        if all(w in text for w in words):
+            return set_timer(f"{minutes} minutes", label)
+    return "I do not know that one. I know eggs, pasta, rice, potatoes, dumplings, tea and a few more"
+
+
+def recipe_by_ingredient(ingredient: str = "") -> str:
+    """Dishes that can be cooked with an ingredient."""
+    item = (ingredient or "").strip().lower().replace(" ", "_")
+    if not item:
+        return "Tell me which ingredient you have"
+    meals = ((_get("https://www.themealdb.com/api/json/v1/1/filter.php", {"i": item}) or {}).get("meals")) or []
+    if not meals:
+        return f"I found no dishes with {ingredient}"
+    picks = random.sample([m["strMeal"] for m in meals if m.get("strMeal")], min(5, len(meals)))
+    return f"With {ingredient.strip().lower()} you could make {_join(picks)}. Ask for any of them and I will read the recipe"
+
+
+def nutrition_info(food: str = "", amount: str = "") -> str:
+    """Calories, protein, carbs and fat of a food (Open Food Facts), per 100 grams or a given weight."""
+    food = (food or "").strip()
+    if not food:
+        return "Tell me which food"
+    data = _get("https://world.openfoodfacts.org/cgi/search.pl", {"search_terms": food, "search_simple": 1, "action": "process",
+                                                                   "json": 1, "page_size": 5, "fields": "product_name,nutriments"})
+    for product in (data or {}).get("products", []):
+        n = product.get("nutriments") or {}
+        kcal = n.get("energy-kcal_100g")
+        if kcal:
+            grams = _amount(amount) if re.search(r"\bg\b|gram", str(amount).lower()) else (_amount(amount) * 1000 if re.search(r"kg|kilo", str(amount).lower()) and _amount(amount) else None)
+            k = (grams or 100) / 100
+            f = lambda key: _num(round((n.get(key) or 0) * k, 1))
+            return (f"{product.get('product_name') or food} has about {_num(round(kcal * k))} calories, {f('proteins_100g')} grams of protein, "
+                    f"{f('carbohydrates_100g')} grams of carbs and {f('fat_100g')} grams of fat per {_num(round(grams)) if grams else 100} grams")
+    return f"I could not find nutrition facts for {food}"
+
+
+def name_day(day: str = "") -> str:
+    """Czech name day (svátek) for today, tomorrow or a date."""
+    d = date.today() if not (day or "").strip() else _parse_date(day, date.today())
+    if d is None:
+        return "Sorry, I did not understand the date"
+    data = _get(f"https://svatkyapi.cz/api/day/{d.isoformat()}")
+    if not data or not data.get("name"):
+        return "Sorry, I could not look up the name day"
+    when = "Today" if d == date.today() else "Tomorrow" if d == date.today() + timedelta(days=1) else _fmt_date(d)
+    return f"{when} the name day is {data['name']}"
+
+
+_MOVES = {"legs": ["squats", "lunges", "glute bridges", "wall sit", "calf raises", "jump squats"],
+          "arms": ["push ups", "tricep dips on a chair", "plank shoulder taps", "arm circles", "diamond push ups", "pike push ups"],
+          "core": ["plank", "crunches", "bicycle crunches", "leg raises", "mountain climbers", "russian twists"],
+          "cardio": ["jumping jacks", "high knees", "butt kicks", "burpees", "skaters", "fast feet"]}
+
+
+def quick_workout(minutes: str = "10", focus: str = "") -> str:
+    """A bodyweight workout of the asked length: 40 seconds work, 20 seconds rest."""
+    n = max(5, min(30, int(_amount(minutes) or 10)))
+    low = (focus or "").lower()
+    key = next((k for k in _MOVES if k in low), None) or ("legs" if "leg" in low else None)
+    pool = _MOVES[key] if key else [m for k in _MOVES for m in random.sample(_MOVES[k], 2)]
+    random.shuffle(pool)
+    moves = [pool[i % len(pool)] for i in range(n - 2)]
+    return (f"{n} minute {key or 'full body'} workout. Start with one minute of marching on the spot. Then do each for 40 seconds with 20 seconds rest: "
+            + ", ".join(moves) + ". Finish with one minute of stretching")
+
+
+
 TOOLS = [
     {
         "type": "function",
@@ -3793,6 +4247,52 @@ _MORE_SPECS = [
 _EXTRA_SPECS.extend(_MORE_SPECS)
 
 
+_MORE_SPECS2 = [
+    _tool("add_event", "Put an appointment or event in the calendar. Use for 'add dentist tomorrow at 3 PM', 'remind me about the meeting on Friday at 9', 'put a party on October 30'.",
+          {"title": _text("What it is, e.g. 'dentist'."), "when": _text("When, e.g. 'tomorrow at 3 PM'. Also 'Friday 18:30', 'October 30 at 6 PM', 'in 2 weeks'.")}, ["title", "when"]),
+    _tool("get_events", "Read the calendar. Use for 'what do I have today', 'what is on tomorrow', 'what is my week like', 'am I free on Friday'.",
+          {"day": _text("Which day, e.g. 'today'. Also 'tomorrow', 'Friday', 'October 30', or 'week'.")}),
+    _tool("cancel_event", "Delete an upcoming calendar event. Use for 'cancel the dentist', 'remove the meeting from my calendar'.",
+          {"title": _text("Words from the event, e.g. 'dentist'.")}, ["title"]),
+    _tool("log_habit", "Count something the user did, for tracking. Use for 'I drank a glass of water', 'log a workout', 'I read 20 pages'.",
+          {"habit": _text("What was done, e.g. 'water'. Also 'workout', 'pages'."), "amount": _text("How many, e.g. '1'. Use '20' for 20 pages.")}, ["habit"]),
+    _tool("habit_stats", "Totals and streak of counted habits. Use for 'how much water did I drink', 'how many workouts this week', 'what is my streak'.",
+          {"habit": _text("Which habit, e.g. 'water'. Leave empty for all of them.")}),
+    _tool("convert_time", "Convert a clock time between two places. Use for 'when it is 3 PM in Prague what time is it in Tokyo', 'my call is at 9 in New York, what is that for me'.",
+          {"clock": _text("The time, e.g. '3 PM'."), "from_place": _text("Where that time is, e.g. 'Prague'. Leave empty for here."), "to_place": _text("Where to convert to, e.g. 'Tokyo'.")}, ["clock", "to_place"]),
+    _tool("compare_deals", "Which of two offers is cheaper per unit. Use for 'is 500 grams for 40 or 1 kilo for 70 cheaper', 'compare two shampoos'.",
+          {"price_a": _text("Price of the first offer, e.g. '40'."), "amount_a": _text("Amount of the first, with unit, e.g. '500 g'."),
+           "price_b": _text("Price of the second offer, e.g. '70'."), "amount_b": _text("Amount of the second, with unit, e.g. '1 kg'.")}, ["price_a", "amount_a", "price_b", "amount_b"]),
+    _tool("loan_payment", "Monthly payment of a loan or mortgage. Use for 'what is the payment on a 3 million loan at 5 percent for 20 years'.",
+          {"amount": _text("Loan amount, e.g. '3000000'."), "rate": _text("Yearly interest in percent, e.g. '5'."), "years": _text("Length, e.g. '20'. Also '36 months'.")}, ["amount", "rate", "years"]),
+    _tool("compound_interest", "What savings grow to. Use for 'what is 10000 worth in 10 years at 4 percent', 'if I save 200 a month for 5 years'.",
+          {"amount": _text("Starting amount, e.g. '10000'. Use '0' if none."), "rate": _text("Yearly interest in percent, e.g. '4'."), "years": _text("How long, e.g. '10'."),
+           "monthly_deposit": _text("Saved every month, e.g. '200'. Leave empty if none.")}, ["amount", "rate", "years"]),
+    _tool("vat_calculator", "Add VAT to a price or take it out. Use for 'what is 1000 with VAT', 'how much VAT is in 1210'.",
+          {"amount": _text("The amount, e.g. '1000'."), "rate": _text("VAT percent, e.g. '21'. Leave empty for the usual rate."),
+           "mode": _text("'add' for a price without VAT, 'remove' for a price that already includes VAT.")}, ["amount"]),
+    _tool("sports_scores", "Today's scores for a league or one team. Use for 'how did Arsenal do', 'NBA scores', 'Champions League results', 'is there a hockey game'.",
+          {"league": _text("The league, e.g. 'Premier League'. Also 'NBA', 'NHL', 'NFL', 'La Liga', 'Bundesliga', 'Champions League'."), "team": _text("Optional team, e.g. 'Arsenal'.")}, ["league"]),
+    _tool("smart_home", "Control the smart home (Home Assistant): lights, switches, blinds, locks, scenes, thermostat. Use for 'turn off the living room light', 'dim the bedroom lamp to 30 percent', 'close the blinds', 'lock the door'.",
+          {"device": _text("The device, e.g. 'living room light'."), "action": _text("'on', 'off', 'toggle', 'open', 'close', 'lock', 'unlock'. For a level use 'set'."),
+           "value": _text("A number when needed, e.g. '30' for brightness percent or '21' for degrees.")}, ["device", "action"]),
+    _tool("home_status", "State of a smart home device or sensor, or which lights are on. Use for 'is the garage door closed', 'how warm is the bedroom', 'which lights are on'.",
+          {"device": _text("The device or sensor, e.g. 'bedroom temperature'. Leave empty to list lights that are on.")}),
+    _tool("wake_on_lan", "Wake up a computer on the home network. Use for 'turn on my PC', 'wake the NAS'.",
+          {"device": _text("The device name, e.g. 'pc'.")}),
+    _tool("cook_timer", "Start a timer with the usual cooking time of a food. Use for 'boil an egg', 'timer for the pasta', 'brew green tea'.",
+          {"food": _text("The food, e.g. 'egg'. Also 'pasta', 'rice', 'potatoes', 'dumplings', 'tea'."), "doneness": _text("Optional, e.g. 'soft', 'hard', 'brown', 'green'.")}, ["food"]),
+    _tool("recipe_by_ingredient", "Dishes you can make with an ingredient. Use for 'what can I cook with chicken', 'ideas for potatoes'.",
+          {"ingredient": _text("The ingredient, e.g. 'chicken'.")}, ["ingredient"]),
+    _tool("nutrition_info", "Calories, protein, carbs and fat of a food. Use for 'how many calories in a banana', 'nutrition of 200 grams of rice'.",
+          {"food": _text("The food, e.g. 'banana'."), "amount": _text("Optional weight, e.g. '200 g'.")}, ["food"]),
+    _tool("name_day", "Czech name day for a day. Use for 'who has a name day today', 'name day tomorrow'.",
+          {"day": _text("Which day, e.g. 'tomorrow'. Leave empty for today.")}),
+    _tool("quick_workout", "A short bodyweight workout. Use for 'give me a 10 minute workout', 'a quick ab workout', 'I want to exercise'.",
+          {"minutes": _text("Length in minutes, e.g. '10'. 5 to 30."), "focus": _text("'legs', 'arms', 'core' or 'cardio'. Leave empty for full body.")}),
+]
+_EXTRA_SPECS.extend(_MORE_SPECS2)
+
 _DISABLED = {n.strip().lower() for n in _env("DISABLED_TOOLS").split(",") if n.strip()}
 TOOLS.extend(s for s in _EXTRA_SPECS if s["function"]["name"] not in _DISABLED)
 
@@ -3840,6 +4340,14 @@ _EXTRA_FUNCS.update({
     "pace_calculator": pace_calculator, "fuel_cost": fuel_cost,
 })
 
+_EXTRA_FUNCS.update({
+    "add_event": add_event, "get_events": get_events, "cancel_event": cancel_event, "log_habit": log_habit,
+    "habit_stats": habit_stats, "convert_time": convert_time, "compare_deals": compare_deals, "loan_payment": loan_payment,
+    "compound_interest": compound_interest, "vat_calculator": vat_calculator, "sports_scores": sports_scores,
+    "smart_home": smart_home, "home_status": home_status, "wake_on_lan": wake_on_lan, "cook_timer": cook_timer,
+    "recipe_by_ingredient": recipe_by_ingredient, "nutrition_info": nutrition_info, "name_day": name_day,
+    "quick_workout": quick_workout,
+})
 TOOL_FUNCTIONS.update({n: f for n, f in _EXTRA_FUNCS.items() if n not in _DISABLED})
 
 # Tools that make no sense inside a scheduled automation (they are for live conversation).
@@ -3857,6 +4365,8 @@ _EXTRA_AUTOMATION_EXCLUDED = {
     "sleep_calculator", "magic_8ball", "word_finder", "recipe_search",
     "bmi", "daily_calories", "pace_calculator", "fuel_cost",
 }
+_EXTRA_AUTOMATION_EXCLUDED |= {"add_event", "cancel_event", "log_habit", "convert_time", "compare_deals", "loan_payment",
+                               "compound_interest", "vat_calculator", "cook_timer", "recipe_by_ingredient", "nutrition_info"}
 AUTOMATION_EXCLUDED |= _EXTRA_AUTOMATION_EXCLUDED
 
 

@@ -23,9 +23,9 @@ import uuid
 from pathlib import Path
 
 try:
-    from .tools import AUTOMATION_EXCLUDED, TOOLS, TOOL_FUNCTIONS, call_tool, example_value
+    from .tools import TOOLS, TOOL_FUNCTIONS, call_tool, example_value
 except ImportError:  # run directly: python LLM/automatization.py
-    from tools import AUTOMATION_EXCLUDED, TOOLS, TOOL_FUNCTIONS, call_tool, example_value
+    from tools import TOOLS, TOOL_FUNCTIONS, call_tool, example_value
 
 AUTOMATIONS_FILE = Path(os.environ.get(
     "AUTOMATIONS_FILE",
@@ -50,12 +50,8 @@ AUTOMATION_NAME_RE = re.compile(
 
 # ---- blocks ----------------------------------------------------------------
 def blocks() -> list:
-    """The block catalog: every tool that makes sense on a schedule is one block."""
-    return [
-        spec.get("function", {})
-        for spec in TOOLS
-        if spec.get("function", {}).get("name") not in AUTOMATION_EXCLUDED
-    ]
+    """The block catalog: every tool from tools.py is one block."""
+    return [spec.get("function", {}) for spec in TOOLS]
 
 
 def _block_params(name: str) -> dict:
@@ -313,10 +309,8 @@ def _parse_block(piece: str) -> tuple:
             rest = rest[1:-1].strip()
         if rest and "=" not in rest and not rest.startswith("{"):
             rest = re.sub(r"^(?:for|in|at|of)\s+", "", rest, flags=re.IGNORECASE)
-    if name in AUTOMATION_EXCLUDED:
-        return None, f"The block {name} only works in a live conversation, not in an automation."
     if name not in TOOL_FUNCTIONS:
-        available = ", ".join(sorted(set(TOOL_FUNCTIONS) - AUTOMATION_EXCLUDED))
+        available = ", ".join(sorted(TOOL_FUNCTIONS))
         return None, f"I do not know a block called {name}. The blocks I have are: {available}."
     params = _block_params(name)
     single = next(iter(params)) if params else None  # a bare value fills the first parameter
@@ -403,6 +397,14 @@ _phrase("today_in_history", "tell you what happened on this day in history", "te
 _phrase("get_birthdays", "tell you the upcoming birthdays", "tell you when {arg} birthday is", "birthdays", "{arg} birthday")
 _phrase("spending_summary", "tell you how much you spent this month", "tell you how much you spent, {arg}", "spending summary", "spending summary")
 _phrase("inspire_me", "tell you an inspiring quote", "tell you an inspiring quote", "a quote", "a quote")
+_phrase("get_events", "tell you what is in your calendar", "tell you what is in your calendar for {arg}", "your calendar", "calendar {arg}")
+_phrase("habit_stats", "tell you your habit totals", "tell you your {arg} totals", "habit totals", "{arg} totals")
+_phrase("name_day", "tell you the name day", "tell you the name day for {arg}", "the name day", "name day {arg}")
+_phrase("sports_scores", "tell you the sports scores", "tell you the {arg} scores", "sports scores", "{arg} scores")
+_phrase("home_status", "tell you which lights are on", "tell you the state of {arg}", "home status", "{arg} status")
+_phrase("smart_home", "control the smart home", "set {arg}", "smart home", "{arg}")
+_phrase("wake_on_lan", "wake up the computer", "wake up the {arg}", "wake up", "wake {arg}")
+_phrase("quick_workout", "give you a workout", "give you a {arg} workout", "a workout", "{arg} workout")
 
 
 def _arg_forecast(a: dict) -> str:
