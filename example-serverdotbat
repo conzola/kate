@@ -1,0 +1,9 @@
+@echo off
+setlocal
+
+set "VENV=...\kate-env"
+set "ESP_DIR=...\kate\ESP\on-pc"
+
+powershell -NoProfile -ExecutionPolicy Bypass -Command "& '%VENV%\Scripts\Activate.ps1'; Set-Location '%ESP_DIR%'; & python '%ESP_DIR%\server.py'"
+
+pause

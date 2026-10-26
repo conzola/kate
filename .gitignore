@@ -1,0 +1,19 @@
+.env
+server.bat
+kate-env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.tmp
+
+# Runtime state and recordings
+memory.json
+automatizations.json
+timers.json
+device_state.json
+user_data.json
+conversation_log.txt
+output_custom_voice.wav
+esp_last_recording.wav
+esp_recordings/

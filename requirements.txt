@@ -1,0 +1,41 @@
+# Kate voice assistant (ASR -> LLM -> TTS -> ESP32)
+# Python 3.12
+#
+#   python -m venv kate-env
+#   kate-env\Scripts\activate      (Windows)   /   source kate-env/bin/activate   (Linux/macOS)
+#   pip install -r requirements.txt
+#
+# GPU note: ASR and TTS use CUDA when PyTorch can see a GPU and fall back to the
+# CPU otherwise (ASR also needs flash-attn for FlashAttention 2, else it uses
+# PyTorch SDPA). For GPU use, install a PyTorch build for your CUDA version:
+#   https://pytorch.org/get-started/locally/
+# Then install a matching flash-attn wheel (optional, not on PyPI for every
+# CUDA/torch combo, e.g. on Windows):
+#   pip install flash-attn --no-build-isolation
+# Force a backend with KATE_ASR_DEVICE=cpu / KATE_ASR_ATTN=sdpa if needed.
+#
+# The LLM itself is not a dependency here: LLM/main.py talks to LM Studio on
+# http://127.0.0.1:1234, which you run separately.
+
+# --- audio + models ---------------------------------------------------------
+numpy==2.5.2
+torch==2.14.1
+qwen-asr==0.0.6          # ASR/main.py: Qwen3-ASR-0.6B transcription
+kokoro==0.9.4            # TTS/main.py: Kokoro-82M speech synthesis
+pymicro-wakeword==2.5.0  # Hey_Kate/listen_kate.py: "Hey Kate" wake word on the PC
+pymicro-features==2.0.2  # audio frontend used by pymicro-wakeword
+soundfile==0.14.0        # WAV read/write for the TTS output and ESP bridge
+sounddevice==0.5.6       # ASR/record.py: microphone input, silence detection
+
+# --- ESP32 bridge (ESP/on-pc/server.py) -------------------------------------
+fastapi==0.143.0
+uvicorn==0.54.0
+python-multipart==0.0.32
+
+# --- networking + system ----------------------------------------------------
+requests==2.34.2         # weather, news, and all the extra tools in LLM/tools.py
+psutil==7.2.2            # optional: used by the pc_status tool
+
+# --- optional ---------------------------------------------------------------
+# python-dotenv          # nicer .env parsing; LLM/tools.py has a built-in fallback
+# psutil                 # already listed above; drop it if you do not need pc_status
