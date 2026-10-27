@@ -6,6 +6,10 @@
 
 Wake word → speech in → local brain → speech out.
 
+<p align="center">
+  <img src="README-image.png" alt="3D render of the Kate voice assistant speaker" width="900">
+</p>
+
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
 ![ASR](https://img.shields.io/badge/ASR-Faster--Whisper-0EA5E9)
 ![TTS](https://img.shields.io/badge/TTS-Kokoro--82M-EC4899)
