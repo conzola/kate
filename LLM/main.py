@@ -13,7 +13,7 @@ except ImportError:  # run directly: python LLM/main.py
     from tools import resolve_tool_tags, tool_prompt
     from automatization import automation_prompt, resolve_automation_tags
 
-LM_URL = "http://127.0.0.1:1234/v1/chat/completions"
+LM_URL = os.getenv("LM_URL", "http://localhost:1234/v1/chat/completions")
 MODEL = os.getenv("KATE_LLM_MODEL", "qwen/qwen3-1.7b")
 DEFAULT_SYSTEM = """You are a voice assistant. Your replies are spoken aloud.
 

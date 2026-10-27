@@ -1,6 +1,6 @@
 """Low-latency English speech recognition for the Kate pipeline.
 
-The default model is Faster-Whisper's small.en running through CTranslate2. It
+The default model is Faster-Whisper's medium.en running through CTranslate2. It
 uses greedy decoding and no second VAD pass because record.py already detects
 the end of speech. Set KATE_ASR_MODEL to another Faster-Whisper model if you
 prefer more accuracy over latency.
@@ -34,7 +34,7 @@ from faster_whisper import WhisperModel
 from .record import record_wav
 
 SAMPLE_RATE = 16000
-MODEL_ID = os.getenv("KATE_ASR_MODEL", "small.en").strip() or "small.en"
+MODEL_ID = os.getenv("KATE_ASR_MODEL", "medium.en").strip() or "medium.en"
 
 
 def _runtime():
