@@ -11,7 +11,7 @@ Wake word → speech in → local brain → speech out.
 </p>
 
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
-![ASR](https://img.shields.io/badge/ASR-Faster--Whisper-0EA5E9)
+![ASR](https://img.shields.io/badge/ASR-Qwen3--ASR-0EA5E9)
 ![TTS](https://img.shields.io/badge/TTS-Kokoro--82M-EC4899)
 ![LM Studio](https://img.shields.io/badge/LLM-LM%20Studio-6E56CF)
 ![ESP32](https://img.shields.io/badge/ESP32-thin%20client-E7352C)
@@ -46,7 +46,7 @@ This is the repository around [the LLM layer](LLM/README.md): a wake-word assist
 |---|---|
 | **Entry points** | [`Final/main.py`](Final/main.py) · [`ESP/on-pc/server.py`](ESP/on-pc/server.py) |
 | **Wake word** | "Hey Kate" — microWakeWord; TFLite Micro on the ESP32, `pymicro-wakeword` on the PC |
-| **ASR** | Faster-Whisper `medium.en` through CTranslate2, 16 kHz mono |
+| **ASR** | Qwen3-ASR `Qwen3-ASR-0.6B`, 16 kHz mono |
 | **LLM** | Any OpenAI-compatible server. Default: [LM Studio](https://lmstudio.ai/) + `qwen3.5-4b` |
 | **TTS** | Kokoro-82M, voice `af_heart`, 24 kHz mono |
 | **Tools** | **120** speech-ready Python functions with inline tags — [catalog](LLM/README.md#the-tool-catalog) |
@@ -62,7 +62,7 @@ This is the repository around [the LLM layer](LLM/README.md): a wake-word assist
 | [`Final/main.py`](Final/main.py) | PC host: wake word, recording, barge-in, streaming playback, automation scheduler |
 | [`ESP/on-pc/server.py`](ESP/on-pc/server.py) | FastAPI bridge: streamed WAV replies, long-poll announcements, timers, volume headers |
 | [`ESP/on-esp/voice_assistant.ino`](ESP/on-esp/voice_assistant.ino) | ESP32 sketch: wake word, mic capture, HTTP upload and audio playback |
-| [`ASR/main.py`](ASR/main.py) | Faster-Whisper model, transcription and startup warmup |
+| [`ASR/main.py`](ASR/main.py) | Qwen3-ASR model, transcription and startup warmup |
 | [`ASR/record.py`](ASR/record.py) | Microphone capture, noise calibration, end-of-speech detection, barge-in detector |
 | [`TTS/main.py`](TTS/main.py) | Kokoro-82M streaming synthesis, sentence splitting and text cleanup |
 | [`LLM/main.py`](LLM/main.py) | One conversation turn: prompt, LM Studio call, tag resolution, memory |
@@ -85,7 +85,7 @@ This is the repository around [the LLM layer](LLM/README.md): a wake-word assist
 ```mermaid
 flowchart LR
     W["Hey Kate<br/>wake word"] --> M["Microphone<br/>16 kHz mono"]
-    M --> A["ASR<br/>Faster-Whisper"]
+    M --> A["ASR<br/>Qwen3-ASR"]
     A --> L["ask()<br/>LLM + 120 tools"]
     L --> T["TTS<br/>Kokoro-82M"]
     T --> S["Speaker / ESP32"]
@@ -97,7 +97,7 @@ flowchart LR
 The pipeline has four models or services, and each one is replaceable:
 
 1. **Wake word** — a small TFLite model watches 16 kHz audio and opens the microphone.
-2. **ASR** — Faster-Whisper turns the finished utterance into text. End-of-speech detection lives in `ASR/record.py`, so the recognizer does not need a second VAD pass.
+2. **ASR** — Qwen3-ASR turns the finished utterance into text. End-of-speech detection lives in `ASR/record.py`, so the recognizer does not need a second VAD pass.
 3. **LLM** — [`ask()`](LLM/main.py) sends the conversation to LM Studio, resolves automation and tool tags, and returns a short spoken reply.
 4. **TTS** — Kokoro-82M synthesizes the reply in chunks. Playback begins with the first chunk.
 
@@ -130,9 +130,9 @@ On a Windows PC with an NVIDIA GPU, replace PyTorch with the matching CUDA build
 python -m pip install --upgrade torch==2.11.0+cu128 --index-url https://download.pytorch.org/whl/cu128
 ```
 
-PyTorch's [official installer](https://pytorch.org/get-started/locally/) lists the available CUDA builds. Kate falls back to CPU when CUDA is unavailable; Kokoro prints a warning and Faster-Whisper retries on CPU int8 if its GPU initialization fails.
+PyTorch's [official installer](https://pytorch.org/get-started/locally/) lists the available CUDA builds. Kate falls back to CPU when CUDA is unavailable; Kokoro prints a warning.
 
-The first run downloads the Faster-Whisper and Kokoro weights (a few hundred MB, cached afterwards in the Hugging Face cache). Startup also warms both models so the first real question is not the slow one.
+The first run downloads the Qwen3-ASR and Kokoro weights (a few hundred MB, cached afterwards in the Hugging Face cache). Startup also warms both models so the first real question is not the slow one.
 
 ### 3. Start LM Studio
 
@@ -216,7 +216,7 @@ sequenceDiagram
    `record_wav()` calibrates the room once, keeps 0.3 s of pre-roll so the first word is not clipped, and ends after 0.35 s of silence. A single recording is capped at 15 s, and 10 s of silence before speech cancels the turn.
 
 3. **Transcribe.**
-   Faster-Whisper runs at 16 kHz with beam search, no timestamps and no VAD filter. `get_speech_end_time()` records the moment the user stopped talking, which is the zero point for the latency line.
+   Qwen3-ASR runs at 16 kHz with beam search, no timestamps and no VAD filter. `get_speech_end_time()` records the moment the user stopped talking, which is the zero point for the latency line.
 
 4. **Think, with tools.**
    `ask()` assembles the system prompt, the 120-tool catalog and the recent conversation. The model replies in plain text with inline tags such as `<get_weather; "Prague"/>`; Python replaces those tags before anything is spoken. Live-data questions that produce no tag get one quiet retry.
@@ -341,7 +341,7 @@ If Kate cuts herself off too easily, raise `INTERRUPT_GAIN` or `INTERRUPT_MIN_SE
 | Stage | Default | Main knob |
 |---|---|---|
 | Wake word | microWakeWord "Hey Kate" | `WAKE_CUTOFF`, `WAKE_WINDOW` |
-| ASR | Faster-Whisper `medium.en` | `KATE_ASR_MODEL`, `KATE_ASR_DEVICE`, `KATE_ASR_COMPUTE_TYPE` |
+| ASR | Qwen3-ASR `Qwen3-ASR` | `KATE_ASR_MODEL`, `KATE_ASR_DEVICE`, `KATE_ASR_COMPUTE_TYPE` |
 | LLM | `qwen3.5-4b` on LM Studio | `KATE_LLM_MODEL`, `LM_URL` |
 | TTS | Kokoro-82M, `af_heart`, 24 kHz | `VOICE`, `SPEED`, `LANG_CODE` |
 
@@ -349,7 +349,7 @@ On an NVIDIA RTX 4060, `Final/main.py` currently reaches about **1 second** end 
 
 ### Speech recognition
 
-The code defaults to `KATE_ASR_MODEL=medium.en`. Larger English models improve accuracy; `small.en` and `base.en` trade some accuracy for lower latency. The recognizer runs on CUDA float16 when available and CPU int8 otherwise, with a fallback to CPU if the CUDA build fails to initialize. Beam search is on, temperature is `0`, and `vad_filter` is off because `ASR/record.py` already found the end of the utterance.
+The code defaults to `KATE_ASR_MODEL=Qwen3-ASR`.
 
 ### Speech synthesis
 
@@ -385,7 +385,7 @@ LM_URL=http://localhost:1234/v1/chat/completions
 |---|---|---|---|
 | `LM_URL` | `http://localhost:1234/v1/chat/completions` | `LLM/main.py` | LM Studio endpoint, loopback or LAN |
 | `KATE_LLM_MODEL` | `qwen3.5-4b` | `LLM/main.py` | Model ID requested from LM Studio |
-| `KATE_ASR_MODEL` | `medium.en` | `ASR/main.py` | Any Faster-Whisper model name |
+| `KATE_ASR_MODEL` | `Qwen3-ASR` | `ASR/main.py` | Any Qwen-ASR model name |
 | `KATE_ASR_DEVICE` | auto | `ASR/main.py` | `cuda:0` or `cpu` |
 | `KATE_ASR_COMPUTE_TYPE` | `float16` / `int8` | `ASR/main.py` | `float16` on CUDA, `int8` on CPU |
 | `KATE_SAVE_RECORDINGS` | `0` | ESP bridge | Keep every ESP prompt as a WAV |
@@ -545,7 +545,7 @@ Any host only needs the public functions above. The ESP bridge is a good templat
 ## Design notes
 
 - **Latency is a pipeline property.** The LLM caps replies at 128 tokens, skips hidden reasoning, streams sentences and lets TTS start early. The first spoken chunk is shorter than the rest on purpose.
-- **Endpointing happens before recognition.** `record.py` decides when the user stopped talking; Faster-Whisper runs without a second VAD pass. That keeps the ASR call simple and the turn boundary predictable.
+- **Endpointing happens before recognition.** `record.py` decides when the user stopped talking; Qwen3-ASR runs without a second VAD pass. That keeps the ASR call simple and the turn boundary predictable.
 - **The ESP32 is a thin client with a local trigger.** The wake word must run on the device, or the microphone would have to stream continuously. Everything after that is server work.
 - **Connections are kept warm.** The PC reuses a `requests.Session` for LM Studio, keeps its PortAudio output stream open, and the ESP32 opens its upload connection before the wake word fires. Startup cost is moved out of the conversation.
 - **Announcements are pushed, not polled.** The long poll means a timer or automation reaches the device immediately, while a heartbeat keeps the link honest when nothing happens.
