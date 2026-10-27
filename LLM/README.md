@@ -2,13 +2,13 @@
 
 # Kate · LLM
 
-**The local brain of a 100-tool voice assistant.**
+**The local brain of a 120-tool voice assistant.**
 
 One model. Plain-text tags. No cloud LLM calls.
 
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
 ![LM Studio](https://img.shields.io/badge/LM%20Studio-local-6E56CF)
-![Tools](https://img.shields.io/badge/tools-100-16A34A)
+![Tools](https://img.shields.io/badge/tools-120-16A34A)
 ![License](https://img.shields.io/badge/license-MIT-0EA5E9)
 
 </div>
@@ -17,7 +17,7 @@ One model. Plain-text tags. No cloud LLM calls.
 >
 > `ask()` sends the turn to a local model. The model replies in plain text and drops tool tags inline, like `<get_weather; "Prague"/>`. Before anything is spoken, Python replaces those tags with live results. The model never has to *know* today's weather, the news, or the time — it only has to know **how to ask**.
 
-This folder is the LLM layer of [Kate](../README.md): the part between speech recognition and speech synthesis. It owns the conversation, the 100-tool catalog, and the scheduler that runs little workflows later on its own.
+This folder is the LLM layer of [Kate](../README.md): the part between speech recognition and speech synthesis. It owns the conversation, the 120-tool catalog, and the scheduler that runs little workflows later on its own.
 
 ---
 
@@ -42,7 +42,7 @@ This folder is the LLM layer of [Kate](../README.md): the part between speech re
 | **Model** | Any OpenAI-compatible server. Default: [LM Studio](https://lmstudio.ai/) + `qwen/qwen3-1.7b` |
 | **Endpoint** | The LM Studio URL configured by `LM_URL` in `main.py` — loopback or a LAN host |
 | **Tool protocol** | Prompt-driven inline tags — **not** native function calling |
-| **Tool catalog** | **100** Python functions returning speech-ready strings |
+| **Tool catalog** | **120** Python functions returning speech-ready strings |
 | **Automation blocks** | Any registered tool; the same catalog powers chat and schedules |
 | **Memory** | Last 12 messages (6 exchanges); reset after 10 minutes idle |
 | **Dependencies** | `requests`; `psutil` is optional (only for `pc_status`) |
@@ -52,7 +52,7 @@ This folder is the LLM layer of [Kate](../README.md): the part between speech re
 | File | Responsibility |
 |---|---|
 | [`main.py`](main.py) | One turn: prompt assembly, LM Studio call, streaming, memory, `/continue` |
-| [`tools.py`](tools.py) | 100 tool functions, the tool spec catalog, tag parser, timers and personal data |
+| [`tools.py`](tools.py) | 120 tool functions, the tool spec catalog, tag parser, timers and personal data |
 | [`automatization.py`](automatization.py) | Recurring workflows, trigger parsing, the scheduler and automation tags |
 
 ### Why this design is interesting
@@ -129,7 +129,7 @@ flowchart LR
     F --> G["resolve_tool_tags()"]
     G --> H["spoken text<br/>+ /continue"]
     H --> I["TTS / speaker"]
-    G -. "HTTP + local JSON" .-> J["100 tools"]
+    G -. "HTTP + local JSON" .-> J["120 tools"]
     F -. "writes" .-> K["automatizations.json"]
     K -. "read by" .-> L["scheduler_loop()"]
     L -. "runs later" .-> J
@@ -194,10 +194,10 @@ Unknown tool names and tags that are never closed are **left as text**, not exec
 
 ## The tool catalog
 
-**100 tools**, grouped by what they are for. Each one returns a short string designed to be spoken, not raw JSON.
+**120 tools**, grouped by what they are for. Each one returns a short string designed to be spoken, not raw JSON.
 
 <details open>
-<summary><b>Time, weather & sky</b> · 14 tools</summary>
+<summary><b>Time, weather & sky</b> · 17 tools</summary>
 
 | Tool | What it does |
 |---|---|
@@ -207,11 +207,14 @@ Unknown tool names and tags that are never closed are **left as text**, not exec
 | `rain_check` | Will it rain in the next hours, and when does it start or stop |
 | `get_sun_times` | Sunrise, sunset and daylight length |
 | `get_air_quality` | Air quality and fine dust |
+| `uv_index` | UV index now and today's peak, with sunscreen advice |
+| `wind_info` | Current wind speed, gusts and direction |
 | `get_pollen` | Tree, grass and weed pollen levels |
 | `moon_phase` | Current moon phase and the next full and new moon |
 | `world_time` | Local time in up to four places |
 | `convert_time` | Translate a clock time between two places |
 | `days_until` | Countdown to a date or holiday, plus its weekday |
+| `calendar_facts` | Weekday, week number, day of the year and leap year for a date |
 | `next_holiday` | Next public holidays for a country |
 | `name_day` | Czech name day for today, tomorrow or a date |
 | `daily_briefing` | Date, weather, air, sunset, holiday, birthdays, calendar, to-do list and headlines |
@@ -219,7 +222,7 @@ Unknown tool names and tags that are never closed are **left as text**, not exec
 </details>
 
 <details>
-<summary><b>News & internet</b> · 13 tools</summary>
+<summary><b>News & internet</b> · 14 tools</summary>
 
 | Tool | What it does |
 |---|---|
@@ -227,6 +230,7 @@ Unknown tool names and tags that are never closed are **left as text**, not exec
 | `news_details` | More about one story from the headlines just read |
 | `public_ip` | Your public IP address |
 | `website_status` | Whether a site is up, and how fast it answers |
+| `ping_host` | Whether a computer, router or server answers, and how fast |
 | `github_repo` | Stars, forks, issues and language of a repository |
 | `package_info` | Latest PyPI or npm version and summary |
 | `get_earthquakes` | Recent notable earthquakes, magnitude 4.5 and up |
@@ -295,7 +299,7 @@ Unknown tool names and tags that are never closed are **left as text**, not exec
 </details>
 
 <details>
-<summary><b>Knowledge & language</b> · 12 tools</summary>
+<summary><b>Knowledge & language</b> · 13 tools</summary>
 
 | Tool | What it does |
 |---|---|
@@ -303,6 +307,7 @@ Unknown tool names and tags that are never closed are **left as text**, not exec
 | `wiki_summary` | Short encyclopedia summary of a topic |
 | `translate` | Translate English into another language |
 | `spell_word` | Spell a word letter by letter |
+| `morse_code` | Translate text into Morse code or Morse back into text |
 | `word_finder` | Synonyms, opposites, rhymes or similar-sounding words |
 | `today_in_history` | Events that happened on this day |
 | `book_search` | Find a book, its author and what it is about |
@@ -315,16 +320,19 @@ Unknown tool names and tags that are never closed are **left as text**, not exec
 </details>
 
 <details>
-<summary><b>Food, health & fitness</b> · 10 tools</summary>
+<summary><b>Food, health & fitness</b> · 13 tools</summary>
 
 | Tool | What it does |
 |---|---|
 | `recipe_search` | Recipe ingredients and steps for a dish |
 | `recipe_by_ingredient` | Dishes you can make with an ingredient |
+| `cooking_measure` | Convert baking amounts between cups, spoons, grams and ounces |
 | `nutrition_info` | Calories, protein, carbs and fat of a food |
 | `cocktail_recipe` | Cocktail ingredients and method |
 | `bmi` | Body mass index and its category |
 | `daily_calories` | Estimated daily calorie needs |
+| `heart_rate_zones` | Heart rate training zones from age |
+| `water_intake` | How much water to drink a day |
 | `pace_calculator` | Running pace and speed from distance and time |
 | `quick_workout` | Short bodyweight workout |
 | `sleep_calculator` | Bedtime or wake-up time from 90-minute sleep cycles |
@@ -333,11 +341,15 @@ Unknown tool names and tags that are never closed are **left as text**, not exec
 </details>
 
 <details>
-<summary><b>Math & money</b> · 9 tools</summary>
+<summary><b>Math & money</b> · 16 tools</summary>
 
 | Tool | What it does |
 |---|---|
 | `calculate` | Arithmetic, percentages, powers and roots via a safe AST evaluator |
+| `statistics_summary` | Average, median, total, lowest, highest and spread of a list of numbers |
+| `roman_numerals` | Convert a number to Roman numerals or back |
+| `number_to_words` | Spell a number in words |
+| `base_converter` | Convert numbers between binary, octal, decimal and hexadecimal |
 | `convert_units` | Length, weight, volume, speed, area, time, data size and temperature |
 | `tip_split` | Tip and bill split between people |
 | `date_math` | Date offsets, intervals, age and weekday calculations |
@@ -346,11 +358,26 @@ Unknown tool names and tags that are never closed are **left as text**, not exec
 | `loan_payment` | Monthly payment of a loan or mortgage |
 | `compound_interest` | What savings grow to over time |
 | `vat_calculator` | Add VAT to a price or take it out |
+| `discount_calculator` | Price after a percentage discount, or two stacked discounts |
+| `electricity_cost` | Running cost of an appliance |
+| `hourly_wage` | Convert pay between hourly, weekly, monthly and yearly |
 
 </details>
 
 <details>
-<summary><b>Fun & randomness</b> · 11 tools</summary>
+<summary><b>Tech & DIY</b> · 4 tools</summary>
+
+| Tool | What it does |
+|---|---|
+| `password_generator` | Generate a random password or PIN |
+| `ohms_law` | Voltage, current, resistance and power from any two of them |
+| `paint_calculator` | How much paint a room needs |
+| `download_time` | How long a download takes at a given speed |
+
+</details>
+
+<details>
+<summary><b>Fun & randomness</b> · 12 tools</summary>
 
 | Tool | What it does |
 |---|---|
@@ -365,6 +392,7 @@ Unknown tool names and tags that are never closed are **left as text**, not exec
 | `cat_fact` | A random cat fact |
 | `number_fact` | A fact about a number, or a random one |
 | `trivia` | Ask a quiz question and check the answer |
+| `zodiac_sign` | Star sign and Chinese zodiac animal for a birthday |
 
 </details>
 
