@@ -5233,6 +5233,16 @@ def tool_prompt() -> str:
     lines = [
         "You can call tools by writing a tag inside your answer; the tag is "
         "replaced by the real tool result before the user sees your message.",
+        "Tag format: <tool_name; argument=\"value\"/>  Always start with <, then the tool name, "
+        "then a semicolon, and end with />.",
+        "Examples:",
+        'User: Weather in Prague? You: Right now in Prague it is <get_weather; "Prague"/>',
+        'User: Who is Ada Lovelace? You: <wiki_summary; topic="Ada Lovelace"/>',
+        'User: What is Meta Quest? You: <wiki_summary; topic="Meta Quest"/>',
+        "These tags are the ONLY way to call a tool. Never write <tool_call>, <function=...>, "
+        "<parameter=...> or [tool(...)]: those are not understood and would be read aloud.",
+        "You can call tools by writing a tag inside your answer; the tag is ",
+        "replaced by the real tool result before the user sees your message.",
         'Example: Right now in Prague it is <get_weather; "Prague"/>',
         "Write your whole answer as plain text with the tag exactly where the "
         "result belongs. Never guess tool data and never write a tool's result "
