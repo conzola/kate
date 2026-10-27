@@ -1,5 +1,6 @@
 import ast
 import base64
+import calendar
 import html as _html
 import json
 import math
@@ -7,7 +8,10 @@ import operator
 import os
 import random
 import re
+import secrets
 import shutil
+import socket
+import statistics
 import threading
 import time
 import uuid
@@ -4293,6 +4297,703 @@ _MORE_SPECS2 = [
 ]
 _EXTRA_SPECS.extend(_MORE_SPECS2)
 
+# ---------------------------------------------------------------------------
+# 20 more tools: sky & network, calculators, health, kitchen, converters, fun
+# ---------------------------------------------------------------------------
+
+def _floats(text) -> list:
+    """All numbers in a text. Thousands separators ('1,200') are removed first."""
+    cleaned = re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", str(text or ""))
+    return [float(m) for m in re.findall(r"-?\d+(?:\.\d+)?", cleaned)]
+
+
+def _first_float(text, default=None):
+    found = _floats(text)
+    return found[0] if found else default
+
+
+def _cash(x: float) -> str:
+    """An amount with the user's currency label, e.g. '1,200 CZK'."""
+    return f"{_money(x)} {_env('EXPENSE_CURRENCY')}".strip()
+
+
+def _and_join(items: list) -> str:
+    items = [i for i in items if i]
+    if len(items) <= 1:
+        return "".join(items)
+    return ", ".join(items[:-1]) + " and " + items[-1]
+
+
+_COMPASS = ["north", "north-northeast", "northeast", "east-northeast", "east", "east-southeast",
+            "southeast", "south-southeast", "south", "south-southwest", "southwest", "west-southwest",
+            "west", "west-northwest", "northwest", "north-northwest"]
+
+
+def uv_index(location: str = "") -> str:
+    """Current and peak UV index with sunscreen advice (Open-Meteo, no key)."""
+    place = _geocode(location)
+    if not place:
+        return _no_place(location)
+    data = _get("https://api.open-meteo.com/v1/forecast",
+                {"latitude": place["latitude"], "longitude": place["longitude"],
+                 "current": "uv_index", "daily": "uv_index_max", "timezone": "auto"})
+    now = ((data or {}).get("current") or {}).get("uv_index")
+    peaks = ((data or {}).get("daily") or {}).get("uv_index_max") or [None]
+    peak = peaks[0]
+    if now is None and peak is None:
+        return "Sorry, I could not get the UV index"
+
+    def level(v: float) -> str:
+        return ("low" if v < 3 else "moderate" if v < 6 else "high" if v < 8
+                else "very high" if v < 11 else "extreme")
+
+    name = place.get("name") or "there"
+    parts = []
+    if now is not None:
+        parts.append(f"In {name} the UV index is {_short(now)} right now, which is {level(now)}")
+    if peak is not None:
+        parts.append(f"today's peak is {_short(peak)}, {level(peak)}")
+    text = ", and ".join(parts) if len(parts) == 2 else parts[0]
+    if peak is not None and peak >= 3:
+        text += ". Sunscreen is a good idea"
+    return text
+
+
+def wind_info(location: str = "") -> str:
+    """Current wind speed, gusts and direction (Open-Meteo, no key)."""
+    place = _geocode(location)
+    if not place:
+        return _no_place(location)
+    data = _get("https://api.open-meteo.com/v1/forecast",
+                {"latitude": place["latitude"], "longitude": place["longitude"],
+                 "current": "wind_speed_10m,wind_gusts_10m,wind_direction_10m", "timezone": "auto"})
+    cur = (data or {}).get("current") or {}
+    speed = cur.get("wind_speed_10m")
+    if speed is None:
+        return "Sorry, I could not get the wind"
+    gust = cur.get("wind_gusts_10m")
+    degrees = cur.get("wind_direction_10m")
+    feel = ("calm" if speed < 5 else "a light breeze" if speed < 20 else "a moderate wind" if speed < 40
+            else "a strong wind" if speed < 60 else "a storm-force wind")
+    text = f"In {place.get('name') or 'there'} it is {feel}, {_short(speed)} kilometers per hour"
+    if degrees is not None:
+        text += f" from the {_COMPASS[int((degrees % 360) / 22.5 + 0.5) % 16]}"
+    if gust is not None and gust - speed >= 10:
+        text += f", with gusts up to {_short(gust)}"
+    return text
+
+
+def password_generator(length: str = "", kind: str = "") -> str:
+    """A random password or PIN, read out character by character (uses `secrets`)."""
+    kind = (kind or "").strip().lower()
+    wanted = _first_float(length)
+    if "pin" in kind or "digit" in kind or "number" in kind:
+        size = max(4, min(int(wanted or 6), 12))
+        chars = [secrets.choice("0123456789") for _ in range(size)]
+        label = "PIN"
+    else:
+        size = max(8, min(int(wanted or 14), 40))
+        lower, upper, digits = "abcdefghijkmnopqrstuvwxyz", "ABCDEFGHJKLMNPQRSTUVWXYZ", "23456789"
+        pool = lower + upper + digits
+        while True:
+            chars = [secrets.choice(pool) for _ in range(size)]
+            if (any(c in lower for c in chars) and any(c in upper for c in chars)
+                    and any(c in digits for c in chars)):
+                break
+        label = "password"
+    spoken = ", ".join(f"capital {c}" if c.isupper() else c for c in chars)
+    return f"Here is a {size} character {label}: {spoken}"
+
+
+_ROMAN_PAIRS = [(1000, "M"), (900, "CM"), (500, "D"), (400, "CD"), (100, "C"), (90, "XC"),
+                (50, "L"), (40, "XL"), (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I")]
+
+
+def _to_roman(n: int) -> str:
+    out = []
+    for value, symbol in _ROMAN_PAIRS:
+        while n >= value:
+            out.append(symbol)
+            n -= value
+    return "".join(out)
+
+
+def _from_roman(s: str) -> int:
+    values = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100, "D": 500, "M": 1000}
+    total = 0
+    for i, ch in enumerate(s):
+        v = values[ch]
+        total += -v if i + 1 < len(s) and values[s[i + 1]] > v else v
+    return total
+
+
+def roman_numerals(value: str = "") -> str:
+    """Convert a number to Roman numerals or Roman numerals to a number."""
+    s = re.sub(r"[\s,]", "", str(value or "")).upper()
+    if re.fullmatch(r"\d+", s):
+        n = int(s)
+        if not 1 <= n <= 3999:
+            return "Roman numerals only cover 1 to 3999"
+        return f"{n} in Roman numerals is {' '.join(_to_roman(n))}"
+    if re.fullmatch(r"[IVXLCDM]+", s):
+        n = _from_roman(s)
+        if _to_roman(n) != s:
+            return f"{' '.join(s)} is not a valid Roman numeral"
+        return f"{' '.join(s)} is {n}"
+    return "Tell me a number or a Roman numeral"
+
+
+_NW_ONES = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+            "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen",
+            "eighteen", "nineteen"]
+_NW_TENS = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"]
+_NW_SCALES = ["", "thousand", "million", "billion", "trillion"]
+
+
+def _under_thousand_words(n: int) -> str:
+    parts = []
+    if n >= 100:
+        parts.append(f"{_NW_ONES[n // 100]} hundred")
+        n %= 100
+    if n:
+        if n < 20:
+            parts.append(_NW_ONES[n])
+        else:
+            parts.append(_NW_TENS[n // 10] + (f"-{_NW_ONES[n % 10]}" if n % 10 else ""))
+    return " ".join(parts)
+
+
+def _int_words(n: int) -> str:
+    if n == 0:
+        return "zero"
+    chunks, i = [], 0
+    while n:
+        n, rest = divmod(n, 1000)
+        if rest:
+            chunks.append(" ".join(x for x in (_under_thousand_words(rest), _NW_SCALES[i]) if x))
+        i += 1
+    return " ".join(reversed(chunks))
+
+
+def number_to_words(number: str = "") -> str:
+    """Spell a number in words, e.g. for writing a cheque."""
+    s = re.sub(r"[\s,]", "", str(number or ""))
+    m = re.fullmatch(r"(-?)(\d+)(?:\.(\d+))?", s)
+    if not m:
+        return "Tell me a number to spell out"
+    if len(m.group(2)) > 15:
+        return "That number is too big for me to spell"
+    text = ("minus " if m.group(1) else "") + _int_words(int(m.group(2)))
+    if m.group(3):
+        text += " point " + " ".join(_NW_ONES[int(d)] for d in m.group(3))
+    return f"{s} is {text}"
+
+
+_BASE_NAMES = {"binary": 2, "bin": 2, "octal": 8, "oct": 8, "decimal": 10, "dec": 10,
+               "hex": 16, "hexadecimal": 16}
+_BASE_DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+
+def _base_of(name: str):
+    s = str(name or "").strip().lower()
+    if not s:
+        return None
+    if s in _BASE_NAMES:
+        return _BASE_NAMES[s]
+    m = re.search(r"\d+", s)
+    return int(m.group()) if m and 2 <= int(m.group()) <= 36 else None
+
+
+def _to_base(n: int, base: int) -> str:
+    if n == 0:
+        return "0"
+    sign, n, out = ("-" if n < 0 else ""), abs(n), []
+    while n:
+        n, r = divmod(n, base)
+        out.append(_BASE_DIGITS[r])
+    return sign + "".join(reversed(out))
+
+
+def _base_name(base: int) -> str:
+    return {2: "binary", 8: "octal", 10: "decimal", 16: "hexadecimal"}.get(base, f"base {base}")
+
+
+def base_converter(number: str = "", from_base: str = "", to_base: str = "") -> str:
+    """Convert between binary, octal, decimal, hexadecimal and any base up to 36."""
+    s = re.sub(r"[\s_]", "", str(number or "").lower())
+    if not s or len(s) > 64:
+        return "Tell me the number to convert"
+    src = _base_of(from_base)
+    for prefix, b in (("0x", 16), ("0b", 2), ("0o", 8)):
+        body = s.lstrip("-")
+        if body.startswith(prefix):
+            src = src or b
+            s = ("-" if s.startswith("-") else "") + body[len(prefix):]
+    src = src or (16 if re.search(r"[a-f]", s) else 10)
+    try:
+        value = int(s, src)
+    except ValueError:
+        return f"{number} is not a valid {_base_name(src)} number"
+    dst = _base_of(to_base)
+    targets = [dst] if dst else ([2, 8, 16] if src == 10 else [10])
+
+    def shown(n: int, base: int) -> str:
+        text = _to_base(n, base)
+        return text if base == 10 else " ".join(text)
+
+    results = [f"{shown(value, b)} in {_base_name(b)}" for b in targets if b != src] or [f"{value} in {_base_name(src)}"]
+    return f"{number} in {_base_name(src)} is " + _and_join(results)
+
+
+_SI_WORDS = (("milli", 1e-3), ("micro", 1e-6), ("mega", 1e6), ("meg", 1e6), ("kilo", 1e3))
+
+
+def _si_value(text):
+    """'20 mA' -> 0.02, '2.2k' -> 2200, '5 volts' -> 5."""
+    m = re.match(r"\s*(-?\d+(?:\.\d+)?)\s*([a-zA-Zµ]*)", str(text or ""))
+    if not m:
+        return None
+    value, unit = float(m.group(1)), m.group(2)
+    low = unit.lower()
+    for word, factor in _SI_WORDS:
+        if low.startswith(word):
+            return value * factor
+    if unit[:1] in ("µ", "u"):
+        return value * 1e-6
+    if unit[:1] == "m" and len(unit) <= 2:
+        return value * 1e-3
+    if unit[:1] == "M":
+        return value * 1e6
+    if unit[:1] == "k" or unit[:1] == "K":
+        return value * 1e3
+    return value
+
+
+def _eng(value: float, unit: str) -> str:
+    for factor, prefix in ((1e6, "mega"), (1e3, "kilo"), (1, ""), (1e-3, "milli")):
+        if abs(value) >= factor:
+            return f"{_short(value / factor)} {prefix}{unit}"
+    return f"{_short(value / 1e-6)} micro{unit}"
+
+
+def ohms_law(voltage: str = "", current: str = "", resistance: str = "", power: str = "") -> str:
+    """Give any two of voltage, current, resistance, power and get the other two."""
+    given = {k: _si_value(v) for k, v in
+             (("v", voltage), ("i", current), ("r", resistance), ("p", power)) if str(v or "").strip()}
+    given = {k: v for k, v in given.items() if v is not None}
+    if len(given) < 2:
+        return "Give me any two of voltage, current, resistance or power"
+    v, i, r, p = (given.get(k) for k in ("v", "i", "r", "p"))
+    try:
+        if v is not None and i is not None:
+            r, p = v / i, v * i
+        elif v is not None and r is not None:
+            i, p = v / r, v * v / r
+        elif i is not None and r is not None:
+            v, p = i * r, i * i * r
+        elif v is not None and p is not None:
+            i, r = p / v, v * v / p
+        elif i is not None and p is not None:
+            v, r = p / i, p / (i * i)
+        else:
+            v, i = math.sqrt(p * r), math.sqrt(p / r)
+    except (ZeroDivisionError, ValueError):
+        return "Those values do not work together"
+    return (f"That gives {_eng(v, 'volts')}, {_eng(i, 'amps')}, {_eng(r, 'ohms')} "
+            f"and {_eng(p, 'watts')}")
+
+
+def paint_calculator(room: str = "", coats: str = "2", ceiling: str = "") -> str:
+    """Liters of paint for a room, from length, width and optional wall height."""
+    nums = _floats(room)
+    if len(nums) < 2:
+        return "Tell me the room size, like 4 by 5 meters"
+    feet = bool(re.search(r"\b(ft|feet|foot)\b", str(room).lower()))
+    k = 0.3048 if feet else 1.0
+    length, width = nums[0] * k, nums[1] * k
+    height = nums[2] * k if len(nums) >= 3 else 2.5
+    n_coats = max(1, min(int(_first_float(coats, 2)), 4))
+    walls = 2 * (length + width) * height
+    area = walls + (length * width if re.search(r"yes|ceil|true|with", str(ceiling).lower()) else 0)
+    liters = math.ceil(area * n_coats / 10 * 2) / 2
+    ceil_note = " including the ceiling" if area > walls else ""
+    return (f"About {_short(area)} square meters{ceil_note}. For {n_coats} coats you need roughly "
+            f"{_short(liters)} liters of paint, at 10 square meters per liter. Subtract doors and windows if you like")
+
+
+def _md_y(text):
+    """(month, day, year or None) from 'tomorrow', '2026-12-24', '24.12.2026', 'March 14', 'Dec 24th 2026'."""
+    s = re.sub(r"(\d)(st|nd|rd|th)\b", r"\1", str(text or "").strip().lower())
+    today = date.today()
+    if s in ("", "today", "now"):
+        return today.month, today.day, today.year
+    if s in ("tomorrow", "yesterday"):
+        d = today + timedelta(days=1 if s == "tomorrow" else -1)
+        return d.month, d.day, d.year
+    m = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})", s)
+    if m:
+        return int(m.group(2)), int(m.group(3)), int(m.group(1))
+    m = re.fullmatch(r"(\d{1,2})[./](\d{1,2})[./](\d{4})", s)
+    if m:
+        return int(m.group(2)), int(m.group(1)), int(m.group(3))
+    names = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+    month = next((i + 1 for i, n in enumerate(names) if re.search(rf"\b{n}[a-z]*", s)), None)
+    nums = [int(x) for x in re.findall(r"\d+", s)]
+    day = next((n for n in nums if 1 <= n <= 31), None)
+    year = next((n for n in nums if n >= 1000), None)
+    return (month, day, year) if month and day else None
+
+
+def calendar_facts(date_text: str = "") -> str:
+    """Weekday, week number, day of the year and leap-year status for a date."""
+    parsed = _md_y(date_text)
+    if not parsed:
+        return "I could not understand that date"
+    month, day, year = parsed
+    try:
+        d = date(year or date.today().year, month, day)
+    except ValueError:
+        return "That date does not exist"
+    total = 366 if calendar.isleap(d.year) else 365
+    yday = d.timetuple().tm_yday
+    left = total - yday
+    text = (f"{d.strftime('%A')}, {d.strftime('%B')} {d.day}, {d.year} is day {yday} of {total} "
+            f"and falls in week {d.isocalendar()[1]}. {d.year} is {'' if total == 366 else 'not '}a leap year")
+    if left == 0:
+        return text + ". It is the last day of the year"
+    return text + f". {left} day{'' if left == 1 else 's'} left in the year"
+
+
+_MORSE = {"a": ".-", "b": "-...", "c": "-.-.", "d": "-..", "e": ".", "f": "..-.", "g": "--.", "h": "....",
+          "i": "..", "j": ".---", "k": "-.-", "l": ".-..", "m": "--", "n": "-.", "o": "---", "p": ".--.",
+          "q": "--.-", "r": ".-.", "s": "...", "t": "-", "u": "..-", "v": "...-", "w": ".--", "x": "-..-",
+          "y": "-.--", "z": "--..", "1": ".----", "2": "..---", "3": "...--", "4": "....-", "5": ".....",
+          "6": "-....", "7": "--...", "8": "---..", "9": "----.", "0": "-----"}
+_MORSE_BACK = {v: k for k, v in _MORSE.items()}
+
+
+def morse_code(text: str = "") -> str:
+    """Encode text to Morse (spoken as dots and dashes) or decode dots and dashes."""
+    raw = str(text or "").strip().lower()
+    if not raw:
+        return "Tell me what to translate into Morse code"
+    symbols = re.sub(r"\bdot\b", ".", re.sub(r"\bdash\b", "-", raw.replace("slash", "/")))
+    if re.fullmatch(r"[.\-/\s,|]+", symbols):
+        words = re.split(r"\s*[/|]\s*", symbols.strip())
+        decoded = ["".join(_MORSE_BACK.get(code, "?") for code in re.split(r"[\s,]+", w.strip()) if code)
+                   for w in words]
+        return "That says " + " ".join(decoded).strip().upper()
+    if len(raw) > 40:
+        return "That is too long for me to say in Morse code. Keep it under 40 characters"
+    spoken = []
+    for word in raw.split():
+        letters = [_MORSE[c] for c in word if c in _MORSE]
+        if letters:
+            spoken.append(", ".join(c.replace(".", "dot ").replace("-", "dash ").strip() for c in letters))
+    return f"{raw} in Morse code is " + "; new word; ".join(spoken) if spoken else "I could not find any letters to translate"
+
+
+def heart_rate_zones(age: str = "", resting_heart_rate: str = "") -> str:
+    """Estimated max heart rate and training zones (Tanaka formula, Karvonen with resting rate)."""
+    years = _first_float(age)
+    if years is None or not 5 <= years <= 100:
+        return "Tell me your age, like 35"
+    peak = 208 - 0.7 * years
+    rest = _first_float(resting_heart_rate)
+    if rest is not None and not 30 <= rest < peak:
+        rest = None
+
+    def bpm(fraction: float) -> int:
+        return round(rest + fraction * (peak - rest)) if rest is not None else round(peak * fraction)
+
+    how = " using your resting rate" if rest is not None else ""
+    return (f"Your estimated maximum heart rate is {round(peak)} beats per minute{how}. "
+            f"Easy zone: {bpm(.6)} to {bpm(.7)}. Aerobic zone: {bpm(.7)} to {bpm(.8)}. "
+            f"Hard zone: {bpm(.8)} to {bpm(.9)}. Above {bpm(.9)} is peak effort")
+
+
+def water_intake(weight: str = "", exercise_minutes: str = "") -> str:
+    """Rough daily water need from body weight and exercise."""
+    value = _first_float(weight)
+    if value is None:
+        return "Tell me your weight, like 70 kilos"
+    kg = value * 0.4536 if re.search(r"lb|pound|stone", str(weight).lower()) else value
+    if not 20 <= kg <= 300:
+        return "That weight does not look right to me"
+    minutes = max(0.0, min(_first_float(exercise_minutes, 0.0), 600.0))
+    liters = kg * 0.033 + minutes / 60 * 0.5
+    text = f"You need about {_short(round(liters, 1))} liters of water a day, around {round(liters / 0.25)} glasses"
+    if minutes:
+        text += f", counting {_short(minutes)} minutes of exercise"
+    return text + ". More if it is hot"
+
+
+def electricity_cost(power: str = "", hours_per_day: str = "", price_per_kwh: str = "") -> str:
+    """Running cost of a device from its power draw, daily hours and the electricity price."""
+    watts = _si_value(power)
+    hours = _first_float(hours_per_day)
+    price = _first_float(price_per_kwh, _first_float(_env("ELECTRICITY_PRICE")))
+    if watts is None or watts <= 0:
+        return "Tell me the power of the device, like 100 watts"
+    if hours is None or not 0 < hours <= 24:
+        return "Tell me how many hours a day it runs"
+    if price is None:
+        return "Tell me the electricity price per kilowatt hour"
+    daily_kwh = watts / 1000 * hours
+    daily = daily_kwh * price
+    return (f"It uses {_short(daily_kwh)} kilowatt hours a day, which costs {_cash(daily)} a day, "
+            f"about {_cash(daily * 30)} a month and {_cash(daily * 365)} a year")
+
+
+def discount_calculator(price: str = "", discount: str = "", extra_discount: str = "") -> str:
+    """Sale price after one or two percentage discounts."""
+    amount, first = _first_float(price), _first_float(discount)
+    second = _first_float(extra_discount, 0.0)
+    if amount is None or first is None:
+        return "Tell me the price and the discount percent"
+    if not (0 <= first <= 100 and 0 <= second <= 100):
+        return "A discount has to be between 0 and 100 percent"
+    final = amount * (1 - first / 100) * (1 - second / 100)
+    both = f"{_short(first)} and then {_short(second)} percent" if second else f"{_short(first)} percent"
+    return f"With {both} off, it costs {_cash(final)}. You save {_cash(amount - final)}"
+
+
+def statistics_summary(numbers: str = "") -> str:
+    """Count, total, average, median, extremes and spread of a list of numbers."""
+    values = _floats(numbers)
+    if not values:
+        return "Tell me some numbers"
+    if len(values) > 200:
+        return "That is too many numbers for me to read out, keep it under 200"
+    text = (f"{len(values)} number{'s' if len(values) != 1 else ''}. Total {_short(sum(values))}, "
+            f"average {_short(statistics.fmean(values))}, median {_short(statistics.median(values))}, "
+            f"lowest {_short(min(values))}, highest {_short(max(values))}")
+    if len(values) >= 2:
+        text += f", standard deviation {_short(statistics.stdev(values))}"
+    return text
+
+
+_ZODIAC_STARTS = [(1, 20, "Aquarius"), (2, 19, "Pisces"), (3, 21, "Aries"), (4, 20, "Taurus"),
+                  (5, 21, "Gemini"), (6, 21, "Cancer"), (7, 23, "Leo"), (8, 23, "Virgo"),
+                  (9, 23, "Libra"), (10, 23, "Scorpio"), (11, 22, "Sagittarius"), (12, 22, "Capricorn")]
+_CHINESE_ZODIAC = ["Rat", "Ox", "Tiger", "Rabbit", "Dragon", "Snake", "Horse", "Goat", "Monkey",
+                   "Rooster", "Dog", "Pig"]
+
+
+def zodiac_sign(birthday: str = "") -> str:
+    """Western star sign for a birth date, plus the Chinese animal when a year is given."""
+    parsed = _md_y(birthday) if str(birthday or "").strip() else None
+    if not parsed:
+        return "Tell me a birthday, like March 14 1990"
+    month, day, year = parsed
+    try:
+        date(2000, month, day)
+    except ValueError:
+        return "That date does not exist"
+    sign = "Capricorn"
+    for m, d, name in _ZODIAC_STARTS:
+        if (month, day) >= (m, d):
+            sign = name
+    text = f"Someone born on {date(2000, month, day).strftime('%B')} {day} is a {sign}"
+    if year:
+        text += f". In the Chinese zodiac {year} is the year of the {_CHINESE_ZODIAC[(year - 4) % 12]}"
+        if month <= 2:
+            text += ", unless the birthday is before Lunar New Year"
+    return text
+
+
+def ping_host(host: str = "", port: str = "") -> str:
+    """Check whether a host answers, and how fast, by timing a TCP connection."""
+    m = re.match(r"^\s*(?:\w+://)?([a-z0-9._-]+)(?::(\d+))?", str(host or "").lower())
+    if not m:
+        return "Tell me which host to check"
+    name = m.group(1)
+    explicit = _first_float(port) or (int(m.group(2)) if m.group(2) else None)
+    ports = [int(explicit)] if explicit and 1 <= explicit <= 65535 else [443, 80]
+    for p in ports:
+        start = time.perf_counter()
+        try:
+            with socket.create_connection((name, p), timeout=3):
+                ms = (time.perf_counter() - start) * 1000
+            return f"{name} answered in {round(ms)} milliseconds on port {p}"
+        except socket.gaierror:
+            return f"I could not find a host called {name}"
+        except OSError:
+            continue
+    return f"{name} did not answer on port {_and_join([str(p) for p in ports]).replace(' and ', ' or ')}"
+
+
+_GRAMS_PER_CUP = {
+    "powdered sugar": 120, "icing sugar": 120, "brown sugar": 213, "sugar": 200, "flour": 120,
+    "butter": 227, "honey": 340, "milk": 245, "water": 237, "rice": 185, "oats": 90, "cocoa": 85,
+    "olive oil": 216, "oil": 218, "salt": 288, "yogurt": 245, "cream": 238, "peanut butter": 258,
+    "chocolate chips": 170, "parmesan": 100,
+}
+_COOK_UNIT_PATTERNS = ((r"tbsp|tbs|tablespoons?", "tbsp"), (r"tsp|teaspoons?", "tsp"), (r"cups?", "cup"),
+                       (r"kg|kilograms?|kilos?", "kg"), (r"g|grams?", "g"), (r"oz|ounces?", "oz"),
+                       (r"lbs?|pounds?", "lb"), (r"ml|milliliters?|millilitres?", "ml"))
+_COOK_LABELS = {"cup": "cups", "tbsp": "tablespoons", "tsp": "teaspoons", "g": "grams", "kg": "kilograms",
+                "oz": "ounces", "lb": "pounds", "ml": "milliliters"}
+
+
+def _cook_unit(word: str):
+    w = str(word or "").strip().lower().rstrip(".")
+    return next((unit for pattern, unit in _COOK_UNIT_PATTERNS if re.fullmatch(pattern, w)), None)
+
+
+def _qty(text: str):
+    """(number, rest) from '2 cups', '1/2 cup', '1 1/2 cups'."""
+    s = str(text or "").lower().strip()
+    m = re.match(r"(\d+)\s+(\d+)\s*/\s*(\d+)\s*(.*)", s)
+    if m and int(m.group(3)):
+        return int(m.group(1)) + int(m.group(2)) / int(m.group(3)), m.group(4).strip()
+    m = re.match(r"(\d+)\s*/\s*(\d+)\s*(.*)", s)
+    if m and int(m.group(2)):
+        return int(m.group(1)) / int(m.group(2)), m.group(3).strip()
+    m = re.match(r"(\d+(?:\.\d+)?)\s*(.*)", s)
+    return (float(m.group(1)), m.group(2).strip()) if m else None
+
+
+def cooking_measure(amount: str = "", ingredient: str = "", to: str = "") -> str:
+    """Convert baking measures between cups, spoons, grams and ounces for common ingredients."""
+    parsed = _qty(amount)
+    if not parsed:
+        return "Tell me the amount, like 2 cups"
+    value, rest = parsed
+    words = rest.split()
+    src = _cook_unit(words[0]) if words else None
+    if not src:
+        return "Tell me the unit, like cups, tablespoons or grams"
+    item = re.sub(r"\bof\b", " ", (ingredient or " ".join(words[1:])).lower()).strip()
+    key = next((k for k in sorted(_GRAMS_PER_CUP, key=len, reverse=True) if k in item), None)
+    if not key:
+        return "I know flour, sugar, butter, honey, milk, water, rice, oats, cocoa, oil, salt and a few more"
+    cup = _GRAMS_PER_CUP[key]
+    per_unit = {"cup": cup, "tbsp": cup / 16, "tsp": cup / 48, "ml": cup / 236.588,
+                "g": 1, "kg": 1000, "oz": 28.3495, "lb": 453.592}
+    dst = _cook_unit(to) or ("g" if src in ("cup", "tbsp", "tsp", "ml") else "cup")
+    result = value * per_unit[src] / per_unit[dst]
+    def label(unit: str, n: float) -> str:
+        word = _COOK_LABELS[unit]
+        return word[:-1] if abs(n - 1) < 1e-9 else word
+
+    return f"{_short(value)} {label(src, value)} of {key} is about {_short(result)} {label(dst, result)}"
+
+
+def _data_parse(text: str):
+    """(amount in base units, is_bits, unit text) from '4 GB', '100 Mbps', '50 megabytes per second'."""
+    m = re.match(r"\s*(\d+(?:\.\d+)?)\s*([a-z/ ]*)", str(text or "").lower())
+    if not m:
+        return None
+    unit = m.group(2).strip()
+    factor = 1.0
+    for key, f in (("tera", 1e12), ("giga", 1e9), ("mega", 1e6), ("kilo", 1e3),
+                   ("t", 1e12), ("g", 1e9), ("m", 1e6), ("k", 1e3)):
+        if unit.startswith(key):
+            factor = f
+            break
+    return float(m.group(1)) * factor, ("bit" in unit or "bps" in unit), unit
+
+
+def _spoken_duration(seconds: float) -> str:
+    seconds = int(round(seconds))
+    if seconds < 1:
+        return "less than a second"
+    days, rest = divmod(seconds, 86400)
+    hours, rest = divmod(rest, 3600)
+    minutes, secs = divmod(rest, 60)
+    parts = [f"{n} {name}{'' if n == 1 else 's'}"
+             for n, name in ((days, "day"), (hours, "hour"), (minutes, "minute"), (secs, "second")) if n]
+    return _and_join(parts[:2])
+
+
+def download_time(size: str = "", speed: str = "") -> str:
+    """How long a download takes from file size and connection speed."""
+    file = _data_parse(size)
+    if not file or not file[2]:
+        return "Tell me the file size, like 4 gigabytes"
+    link = _data_parse(speed)
+    if not link:
+        return "Tell me the connection speed, like 100 megabits per second"
+    if not link[2]:  # a bare number is read as megabits per second, the usual way ISPs quote it
+        link = (link[0] * 1e6, True, "")
+    file_bytes = file[0] / 8 if file[1] else file[0]
+    link_bytes = link[0] / 8 if link[1] else link[0]
+    if link_bytes <= 0:
+        return "That speed does not look right"
+    return f"It would take about {_spoken_duration(file_bytes / link_bytes)} at full speed"
+
+
+def hourly_wage(amount: str = "", period: str = "hour", hours_per_week: str = "40") -> str:
+    """Convert pay between hourly, weekly, monthly and yearly."""
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(k|thousand|m|million)?\b",
+                  re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", str(amount or "").lower()))
+    if not m:
+        return "Tell me the amount, like 30 an hour or 60 thousand a year"
+    value = float(m.group(1)) * {"k": 1e3, "thousand": 1e3, "m": 1e6, "million": 1e6}.get(m.group(2), 1)
+    p = str(period or "hour").lower()
+    p = ("hour" if "hour" in p else "week" if "week" in p else "month" if "month" in p
+         else "year" if re.search(r"year|annual|salary", p) else "hour")
+    hours = _first_float(hours_per_week, 40.0)
+    if not 0 < hours <= 100:
+        return "Hours per week should be between 1 and 100"
+    weekly = {"hour": value * hours, "week": value, "month": value * 12 / 52, "year": value / 52}[p]
+    figures = {"hour": weekly / hours, "week": weekly, "month": weekly * 52 / 12, "year": weekly * 52}
+    per = {"hour": "an hour", "week": "a week", "month": "a month", "year": "a year"}
+    others = [f"{_cash(figures[k])} {per[k]}" for k in ("hour", "week", "month", "year") if k != p]
+    return f"{_cash(value)} {per[p]} works out to {_and_join(others)}, at {_short(hours)} hours a week"
+
+
+_MORE_SPECS3 = [
+    _tool("uv_index", "UV index now and today's peak, with sunscreen advice. Use for 'what is the UV index', 'do I need sunscreen', 'how strong is the sun'.",
+          {"location": _text("City, e.g. 'Prague'. Leave empty for home.")}),
+    _tool("wind_info", "Current wind speed, gusts and direction. Use for 'how windy is it', 'what is the wind like in Brno', 'is it stormy'.",
+          {"location": _text("City, e.g. 'Prague'. Leave empty for home.")}),
+    _tool("password_generator", "Generate a random password or PIN and read it out. Use for 'make me a password', 'give me a 6 digit PIN'.",
+          {"length": _text("How many characters, e.g. '14'."), "kind": _text("'password' normally, e.g. 'password'. Use 'pin' for digits only.")}),
+    _tool("roman_numerals", "Convert a number to Roman numerals or back. Use for 'what is 2026 in Roman numerals', 'what is XIV'.",
+          {"value": _text("A number like '2026' or Roman numerals like 'XIV'.")}, ["value"]),
+    _tool("number_to_words", "Spell a number in words. Use for 'write 1250 in words', 'how do you spell the number 4096'.",
+          {"number": _text("The number, e.g. '1250'. Decimals like '3.14' work too.")}, ["number"]),
+    _tool("base_converter", "Convert numbers between binary, octal, decimal and hexadecimal. Use for 'what is 255 in binary', 'convert ff from hex to decimal'.",
+          {"number": _text("The number, e.g. '255'. Also 'ff', '1010', '0x1F'."), "from_base": _text("Its base, e.g. 'decimal'. Also 'binary', 'octal', 'hex'. Leave empty for decimal."),
+           "to_base": _text("Target base, e.g. 'binary'. Leave empty to show the usual ones.")}, ["number"]),
+    _tool("ohms_law", "Electronics: give any two of voltage, current, resistance and power, get the rest. Use for 'what resistor for 5 volts and 20 milliamps', 'current through 220 ohms at 3.3 volts'.",
+          {"voltage": _text("e.g. '5 V' or '3.3'."), "current": _text("e.g. '20 mA'."), "resistance": _text("e.g. '220 ohm' or '4.7k'."), "power": _text("e.g. '0.5 W'.")}),
+    _tool("paint_calculator", "How much paint a room needs. Use for 'how much paint for a 4 by 5 meter room', 'paint for my bedroom'.",
+          {"room": _text("Length, width and optional wall height, e.g. '4 by 5 meters, 2.5 high'. Say 'feet' for feet."),
+           "coats": _text("Number of coats, e.g. '2'."), "ceiling": _text("'yes' to include the ceiling. Leave empty otherwise.")}, ["room"]),
+    _tool("calendar_facts", "Weekday, week number, day of the year and leap year for a date. Use for 'what week is it', 'what day of the year is it', 'is 2028 a leap year', 'what weekday is December 24'.",
+          {"date_text": _text("The date, e.g. 'December 24'. Also 'tomorrow', '2028-02-29'. Leave empty for today.")}),
+    _tool("morse_code", "Translate text into Morse code or Morse back into text. Use for 'say SOS in Morse code', 'what is dot dash dot in Morse'.",
+          {"text": _text("The words to encode, e.g. 'SOS'. Or dots and dashes to decode, e.g. '... --- ...'.")}, ["text"]),
+    _tool("heart_rate_zones", "Heart rate training zones from age. Use for 'what is my max heart rate', 'heart rate zones for a 40 year old'.",
+          {"age": _text("Age in years, e.g. '35'."), "resting_heart_rate": _text("Optional resting pulse, e.g. '60'.")}, ["age"]),
+    _tool("water_intake", "How much water to drink a day. Use for 'how much water should I drink', 'daily water for 70 kilos'.",
+          {"weight": _text("Body weight, e.g. '70 kg'. Also '150 pounds'."), "exercise_minutes": _text("Optional minutes of exercise per day, e.g. '45'.")}, ["weight"]),
+    _tool("electricity_cost", "Running cost of an appliance. Use for 'what does a 2000 watt heater cost to run', 'cost of leaving a 100 watt PC on all day'.",
+          {"power": _text("Device power, e.g. '100 W'. Also '2 kW'."), "hours_per_day": _text("Hours it runs per day, e.g. '8'."),
+           "price_per_kwh": _text("Electricity price per kilowatt hour, e.g. '5'. Leave empty for the saved price.")}, ["power", "hours_per_day"]),
+    _tool("discount_calculator", "Price after a percentage discount, or two stacked discounts. Use for 'what is 1200 with 30 percent off', 'a jacket for 90 at 20 percent off and another 10'.",
+          {"price": _text("Original price, e.g. '1200'."), "discount": _text("Discount percent, e.g. '30'."), "extra_discount": _text("Optional second discount percent, e.g. '10'.")}, ["price", "discount"]),
+    _tool("statistics_summary", "Average, median, total, lowest, highest and spread of a list of numbers. Use for 'average of 4, 8 and 15', 'what is the median of these numbers'.",
+          {"numbers": _text("The numbers, e.g. '4, 8, 15, 16, 23'.")}, ["numbers"]),
+    _tool("zodiac_sign", "Star sign and Chinese zodiac animal for a birthday. Use for 'what sign is March 14', 'what is my zodiac if I was born in 1990'.",
+          {"birthday": _text("The birthday, e.g. 'March 14 1990'. Without a year only the star sign is given.")}, ["birthday"]),
+    _tool("ping_host", "Check whether a computer, router or server answers and how fast. Use for 'is my NAS up', 'ping google.com', 'can you reach 192.168.1.1'.",
+          {"host": _text("Host name or IP, e.g. 'google.com' or '192.168.1.1'."), "port": _text("Optional port, e.g. '22'. Leave empty to try the web ports.")}, ["host"]),
+    _tool("cooking_measure", "Convert baking amounts between cups, spoons, grams and ounces for an ingredient. Use for 'how many grams is a cup of flour', '200 grams of sugar in cups'.",
+          {"amount": _text("Amount with unit, e.g. '2 cups'. Also '200 g', '3 tbsp'."), "ingredient": _text("The ingredient, e.g. 'flour'. Also 'sugar', 'butter', 'honey'."),
+           "to": _text("Optional target unit, e.g. 'grams'. Also 'cups', 'ounces'.")}, ["amount", "ingredient"]),
+    _tool("download_time", "How long a download takes. Use for 'how long to download 50 gigabytes on 100 megabit', 'how fast will a 700 MB file arrive'.",
+          {"size": _text("File size, e.g. '4 GB'."), "speed": _text("Connection speed, e.g. '100 Mbps'. Also '12 MB/s'.")}, ["size", "speed"]),
+    _tool("hourly_wage", "Convert pay between hourly, weekly, monthly and yearly. Use for 'what is 30 an hour per year', 'what is 60 thousand a year per hour'.",
+          {"amount": _text("The pay, e.g. '30'. Also '60k'."), "period": _text("What the amount covers: 'hour', 'week', 'month' or 'year'."),
+           "hours_per_week": _text("Working hours per week, e.g. '40'.")}, ["amount", "period"]),
+]
+_EXTRA_SPECS.extend(_MORE_SPECS3)
+
+
 _DISABLED = {n.strip().lower() for n in _env("DISABLED_TOOLS").split(",") if n.strip()}
 TOOLS.extend(s for s in _EXTRA_SPECS if s["function"]["name"] not in _DISABLED)
 
@@ -4348,6 +5049,15 @@ _EXTRA_FUNCS.update({
     "recipe_by_ingredient": recipe_by_ingredient, "nutrition_info": nutrition_info, "name_day": name_day,
     "quick_workout": quick_workout,
 })
+_EXTRA_FUNCS.update({
+    "uv_index": uv_index, "wind_info": wind_info, "password_generator": password_generator,
+    "roman_numerals": roman_numerals, "number_to_words": number_to_words, "base_converter": base_converter,
+    "ohms_law": ohms_law, "paint_calculator": paint_calculator, "calendar_facts": calendar_facts,
+    "morse_code": morse_code, "heart_rate_zones": heart_rate_zones, "water_intake": water_intake,
+    "electricity_cost": electricity_cost, "discount_calculator": discount_calculator,
+    "statistics_summary": statistics_summary, "zodiac_sign": zodiac_sign, "ping_host": ping_host,
+    "cooking_measure": cooking_measure, "download_time": download_time, "hourly_wage": hourly_wage,
+})
 TOOL_FUNCTIONS.update({n: f for n, f in _EXTRA_FUNCS.items() if n not in _DISABLED})
 
 # Tools that make no sense inside a scheduled automation (they are for live conversation).
@@ -4367,6 +5077,11 @@ _EXTRA_AUTOMATION_EXCLUDED = {
 }
 _EXTRA_AUTOMATION_EXCLUDED |= {"add_event", "cancel_event", "log_habit", "convert_time", "compare_deals", "loan_payment",
                                "compound_interest", "vat_calculator", "cook_timer", "recipe_by_ingredient", "nutrition_info"}
+# Calculators and converters need live input; uv_index, wind_info, ping_host and calendar_facts stay schedulable.
+_EXTRA_AUTOMATION_EXCLUDED |= {"password_generator", "roman_numerals", "number_to_words", "base_converter",
+                               "ohms_law", "paint_calculator", "morse_code", "heart_rate_zones", "water_intake",
+                               "electricity_cost", "discount_calculator", "statistics_summary", "zodiac_sign",
+                               "cooking_measure", "download_time", "hourly_wage"}
 AUTOMATION_EXCLUDED |= _EXTRA_AUTOMATION_EXCLUDED
 
 

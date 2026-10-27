@@ -30,7 +30,7 @@ These are target latency figures, and optimization is still ongoing.
 
 ### Goals:
 
-- **100/500 tools**
+- **120/500 tools** (counted from the `TOOLS` registry in `LLM/tools.py`)
 - **more coming soon**
 
 ## Requirements
