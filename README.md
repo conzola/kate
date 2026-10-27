@@ -7,7 +7,7 @@
 Wake word → speech in → local brain → speech out.
 
 <p align="center">
-  <img src="README-image.png" alt="3D render of the Kate voice assistant speaker" width="900">
+  <img src="README-image.png" alt="3D render of the Kate voice assistant speaker" width="500">
 </p>
 
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
