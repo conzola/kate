@@ -39,7 +39,7 @@ This folder is the LLM layer of [Kate](../README.md): the part between speech re
 | Property | Value |
 |---|---|
 | **Entry point** | [`main.py`](main.py) → `ask()` |
-| **Model** | Any OpenAI-compatible server. Default: [LM Studio](https://lmstudio.ai/) + `qwen/qwen3-1.7b` |
+| **Model** | Any OpenAI-compatible server. Default: [LM Studio](https://lmstudio.ai/) + `qwen3.5-4b` |
 | **Endpoint** | The LM Studio URL configured by `LM_URL` in `main.py` — loopback or a LAN host |
 | **Tool protocol** | Prompt-driven inline tags — **not** native function calling |
 | **Tool catalog** | **120** Python functions returning speech-ready strings |
@@ -68,7 +68,7 @@ This folder is the LLM layer of [Kate](../README.md): the part between speech re
 
 ### 1. Start LM Studio
 
-1. Open [LM Studio](https://lmstudio.ai/) and load a model. The project default is `qwen/qwen3-1.7b` for low latency.
+1. Open [LM Studio](https://lmstudio.ai/) and load a model. The project default is `qwen3.5-4b` for low latency.
 2. Start the LM Studio server on port `1234`. If it runs on another computer, set `LM_URL` in `main.py` to that address.
 3. Leave the model loaded — Kate connects to it for every turn.
 
@@ -498,7 +498,7 @@ What day should I remind you?
 
 | Setting | Default | Purpose |
 |---|---|---|
-| `KATE_LLM_MODEL` | `qwen/qwen3-1.7b` | Model ID requested from LM Studio |
+| `KATE_LLM_MODEL` | `qwen3.5-4b` | Model ID requested from LM Studio |
 | `LM_URL` | set in `main.py` | Endpoint of the LM Studio server — loopback or a LAN address |
 
 The request deliberately uses `max_tokens: 128` and `reasoning_effort: "none"`. Short answers are faster to speak, and skipping hidden reasoning keeps latency down on small local models.

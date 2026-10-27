@@ -43,7 +43,7 @@ This is the repository around [the LLM layer](LLM/README.md): a wake-word assist
 | **Entry points** | [`Final/main.py`](Final/main.py) · [`ESP/on-pc/server.py`](ESP/on-pc/server.py) |
 | **Wake word** | "Hey Kate" — microWakeWord; TFLite Micro on the ESP32, `pymicro-wakeword` on the PC |
 | **ASR** | Faster-Whisper `medium.en` through CTranslate2, 16 kHz mono |
-| **LLM** | Any OpenAI-compatible server. Default: [LM Studio](https://lmstudio.ai/) + `qwen/qwen3-1.7b` |
+| **LLM** | Any OpenAI-compatible server. Default: [LM Studio](https://lmstudio.ai/) + `qwen3.5-4b` |
 | **TTS** | Kokoro-82M, voice `af_heart`, 24 kHz mono |
 | **Tools** | **120** speech-ready Python functions with inline tags — [catalog](LLM/README.md#the-tool-catalog) |
 | **Memory** | Last 12 messages (6 exchanges); reset after 10 minutes idle |
@@ -132,7 +132,7 @@ The first run downloads the Faster-Whisper and Kokoro weights (a few hundred MB,
 
 ### 3. Start LM Studio
 
-1. Open [LM Studio](https://lmstudio.ai/) and load a model. The project default is `qwen/qwen3-1.7b` for low latency.
+1. Open [LM Studio](https://lmstudio.ai/) and load a model. The project default is `qwen3.5-4b` for low latency.
 2. Start the local server on port `1234`.
 3. Leave the model loaded — Kate connects for every turn.
 
@@ -338,7 +338,7 @@ If Kate cuts herself off too easily, raise `INTERRUPT_GAIN` or `INTERRUPT_MIN_SE
 |---|---|---|
 | Wake word | microWakeWord "Hey Kate" | `WAKE_CUTOFF`, `WAKE_WINDOW` |
 | ASR | Faster-Whisper `medium.en` | `KATE_ASR_MODEL`, `KATE_ASR_DEVICE`, `KATE_ASR_COMPUTE_TYPE` |
-| LLM | `qwen/qwen3-1.7b` on LM Studio | `KATE_LLM_MODEL`, `LM_URL` |
+| LLM | `qwen3.5-4b` on LM Studio | `KATE_LLM_MODEL`, `LM_URL` |
 | TTS | Kokoro-82M, `af_heart`, 24 kHz | `VOICE`, `SPEED`, `LANG_CODE` |
 
 On an NVIDIA RTX 4060, `Final/main.py` currently reaches about **1 second** end to end, with the best runs around **0.65 seconds**. The ESP32 path is around **0.8 seconds**, with lows near **0.65 seconds**. Targets are the same numbers; optimization is ongoing, and the time depends heavily on the LLM being used. `qwen3-1.7b` produced the fastest run.
@@ -380,7 +380,7 @@ LM_URL=http://localhost:1234/v1/chat/completions
 | Variable | Default | Used by | Purpose |
 |---|---|---|---|
 | `LM_URL` | `http://localhost:1234/v1/chat/completions` | `LLM/main.py` | LM Studio endpoint, loopback or LAN |
-| `KATE_LLM_MODEL` | `qwen/qwen3-1.7b` | `LLM/main.py` | Model ID requested from LM Studio |
+| `KATE_LLM_MODEL` | `qwen3.5-4b` | `LLM/main.py` | Model ID requested from LM Studio |
 | `KATE_ASR_MODEL` | `medium.en` | `ASR/main.py` | Any Faster-Whisper model name |
 | `KATE_ASR_DEVICE` | auto | `ASR/main.py` | `cuda:0` or `cpu` |
 | `KATE_ASR_COMPUTE_TYPE` | `float16` / `int8` | `ASR/main.py` | `float16` on CUDA, `int8` on CPU |

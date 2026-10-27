@@ -14,7 +14,7 @@ except ImportError:  # run directly: python LLM/main.py
     from automatization import automation_prompt, resolve_automation_tags
 
 LM_URL = os.getenv("LM_URL", "http://localhost:1234/v1/chat/completions")
-MODEL = os.getenv("KATE_LLM_MODEL", "qwen/qwen3-1.7b")
+MODEL = os.getenv("KATE_LLM_MODEL", "qwen3.5-4b")
 DEFAULT_SYSTEM = """You are a voice assistant. Your replies are spoken aloud.
 
 STYLE

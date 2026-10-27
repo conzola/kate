@@ -2,3 +2,4 @@ WEATHER_API_KEY=...
 WEATHER_BASE_URL=https://api.weatherapi.com/v1
 NEWS_BASE_URL=https://news.google.com/rss
 LM_URL=http://localhost:1234/v1/chat/completions
+KATE_LLM_MODEL=qwen3.5-4b
