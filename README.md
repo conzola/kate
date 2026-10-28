@@ -15,7 +15,7 @@ Wake word → speech in → local brain → speech out.
 ![TTS](https://img.shields.io/badge/TTS-Kokoro--82M-EC4899)
 ![LM Studio](https://img.shields.io/badge/LLM-LM%20Studio-6E56CF)
 ![ESP32](https://img.shields.io/badge/ESP32-thin%20client-E7352C)
-![Tools](https://img.shields.io/badge/tools-150-16A34A)
+![Tools](https://img.shields.io/badge/tools-200-16A34A)
 ![License](https://img.shields.io/badge/license-MIT-0EA5E9)
 
 </div>
@@ -24,7 +24,7 @@ Wake word → speech in → local brain → speech out.
 >
 > [`Final/main.py`](Final/main.py) runs Kate on a PC with a microphone and speakers. [`ESP/on-pc/server.py`](ESP/on-pc/server.py) puts the same ASR → LLM → TTS pipeline behind a small FastAPI bridge for the ESP32. The device runs the wake word, captures audio and plays the reply; the thinking stays on the PC.
 
-This is the repository around [the LLM layer](LLM/README.md): a wake-word assistant that listens locally, thinks locally, speaks locally, and reaches the internet only when a tool needs a live fact. Work in progress — **150 of 500 planned tools** are in place.
+This is the repository around [the LLM layer](LLM/README.md): a wake-word assistant that listens locally, thinks locally, speaks locally, and reaches the internet only when a tool needs a live fact. Work in progress — **200 of 500 planned tools** are in place.
 
 ---
 
@@ -49,7 +49,7 @@ This is the repository around [the LLM layer](LLM/README.md): a wake-word assist
 | **ASR** | Qwen3-ASR `Qwen3-ASR-0.6B`, 16 kHz mono |
 | **LLM** | Any OpenAI-compatible server. Default: [LM Studio](https://lmstudio.ai/) + `qwen3.5-4b` |
 | **TTS** | Kokoro-82M, voice `af_heart`, 24 kHz mono |
-| **Tools** | **150** speech-ready Python functions with inline tags — [catalog](LLM/README.md#the-tool-catalog) |
+| **Tools** | **200** speech-ready Python functions with inline tags — [catalog](LLM/README.md#the-tool-catalog) |
 | **Memory** | Last 12 messages (6 exchanges); reset after 10 minutes idle |
 | **Latency** | ~1 s on an RTX 4060; ~0.8 s on ESP32; best runs around 0.65 s |
 | **Hardware** | 8 GB VRAM recommended; more for larger LLMs |
@@ -66,7 +66,7 @@ This is the repository around [the LLM layer](LLM/README.md): a wake-word assist
 | [`ASR/record.py`](ASR/record.py) | Microphone capture, noise calibration, end-of-speech detection, barge-in detector |
 | [`TTS/main.py`](TTS/main.py) | Kokoro-82M streaming synthesis, sentence splitting and text cleanup |
 | [`LLM/main.py`](LLM/main.py) | One conversation turn: prompt, LM Studio call, tag resolution, memory |
-| [`LLM/tools.py`](LLM/tools.py) | 150 tools, parser, timers and personal data |
+| [`LLM/tools.py`](LLM/tools.py) | 200 tools, parser, timers and personal data |
 | [`LLM/automatization.py`](LLM/automatization.py) | Recurring workflows, triggers and the scheduler |
 | [`Hey_Kate/listen_kate.py`](Hey_Kate/listen_kate.py) | Desktop "Hey Kate" wake word using the same model as the ESP32 |
 
@@ -86,7 +86,7 @@ This is the repository around [the LLM layer](LLM/README.md): a wake-word assist
 flowchart LR
     W["Hey Kate<br/>wake word"] --> M["Microphone<br/>16 kHz mono"]
     M --> A["ASR<br/>Qwen3-ASR"]
-    A --> L["ask()<br/>LLM + 150 tools"]
+    A --> L["ask()<br/>LLM + 200 tools"]
     L --> T["TTS<br/>Kokoro-82M"]
     T --> S["Speaker / ESP32"]
     L -. "live facts" .-> X["Weather · news · home<br/>timers · calendar"]
@@ -219,7 +219,7 @@ sequenceDiagram
    Qwen3-ASR runs at 16 kHz with beam search, no timestamps and no VAD filter. `get_speech_end_time()` records the moment the user stopped talking, which is the zero point for the latency line.
 
 4. **Think, with tools.**
-   `ask()` assembles the system prompt, the 150-tool catalog and the recent conversation. The model replies in plain text with inline tags such as `<get_weather; "Prague"/>`; Python replaces those tags before anything is spoken. Live-data questions that produce no tag get one quiet retry.
+   `ask()` assembles the system prompt, the 200-tool catalog and the recent conversation. The model replies in plain text with inline tags such as `<get_weather; "Prague"/>`; Python replaces those tags before anything is spoken. Live-data questions that produce no tag get one quiet retry.
 
 5. **Speak while the model is still writing.**
    `on_sentence` hands complete, safe sentences to Kokoro as they arrive. Chunks of up to 30 words are synthesized in the background, and the first chunk is deliberately kept short so playback starts sooner. The full reply is also written to `output_custom_voice.wav`.
@@ -585,7 +585,7 @@ Any host only needs the public functions above. The ESP bridge is a good templat
 
 ## Related
 
-- [LLM README](LLM/README.md) — the brain: tag protocol, 150-tool catalog, automations, memory and configuration
+- [LLM README](LLM/README.md) — the brain: tag protocol, 200-tool catalog, automations, memory and configuration
 - [PC host](Final/main.py) — wake word, streaming speech and barge-in
 - [ESP32 bridge](ESP/on-pc/server.py) — FastAPI server for the device
 - [ESP32 sketch](ESP/on-esp/voice_assistant.ino) — wake word, microphone and playback firmware

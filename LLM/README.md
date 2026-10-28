@@ -2,13 +2,13 @@
 
 # Kate · LLM
 
-**The local brain of a 150-tool voice assistant.**
+**The local brain of a 200-tool voice assistant.**
 
 One model. Plain-text tags. No cloud LLM calls.
 
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
 ![LM Studio](https://img.shields.io/badge/LM%20Studio-local-6E56CF)
-![Tools](https://img.shields.io/badge/tools-150-16A34A)
+![Tools](https://img.shields.io/badge/tools-200-16A34A)
 ![License](https://img.shields.io/badge/license-MIT-0EA5E9)
 
 </div>
@@ -17,7 +17,7 @@ One model. Plain-text tags. No cloud LLM calls.
 >
 > `ask()` sends the turn to a local model. The model replies in plain text and drops tool tags inline, like `<get_weather; "Prague"/>`. Before anything is spoken, Python replaces those tags with live results. The model never has to *know* today's weather, the news, or the time — it only has to know **how to ask**.
 
-This folder is the LLM layer of [Kate](../README.md): the part between speech recognition and speech synthesis. It owns the conversation, the 150-tool catalog, and the scheduler that runs little workflows later on its own.
+This folder is the LLM layer of [Kate](../README.md): the part between speech recognition and speech synthesis. It owns the conversation, the 200-tool catalog, and the scheduler that runs little workflows later on its own.
 
 ---
 
@@ -42,7 +42,7 @@ This folder is the LLM layer of [Kate](../README.md): the part between speech re
 | **Model** | Any OpenAI-compatible server. Default: [LM Studio](https://lmstudio.ai/) + `qwen3.5-4b` |
 | **Endpoint** | The LM Studio URL configured by `LM_URL` in `main.py` — loopback or a LAN host |
 | **Tool protocol** | Prompt-driven inline tags — **not** native function calling |
-| **Tool catalog** | **150** Python functions returning speech-ready strings |
+| **Tool catalog** | **200** Python functions returning speech-ready strings |
 | **Automation blocks** | Any registered tool; the same catalog powers chat and schedules |
 | **Memory** | Last 12 messages (6 exchanges); reset after 10 minutes idle |
 | **Dependencies** | `requests`; `psutil` is optional (only for `pc_status`) |
@@ -52,7 +52,7 @@ This folder is the LLM layer of [Kate](../README.md): the part between speech re
 | File | Responsibility |
 |---|---|
 | [`main.py`](main.py) | One turn: prompt assembly, LM Studio call, streaming, memory, `/continue` |
-| [`tools.py`](tools.py) | 150 tool functions, the tool spec catalog, tag parser, timers and personal data |
+| [`tools.py`](tools.py) | 200 tool functions, the tool spec catalog, tag parser, timers and personal data |
 | [`automatization.py`](automatization.py) | Recurring workflows, trigger parsing, the scheduler and automation tags |
 
 ### Why this design is interesting
@@ -129,7 +129,7 @@ flowchart LR
     F --> G["resolve_tool_tags()"]
     G --> H["spoken text<br/>+ /continue"]
     H --> I["TTS / speaker"]
-    G -. "HTTP + local JSON" .-> J["150 tools"]
+    G -. "HTTP + local JSON" .-> J["200 tools"]
     F -. "writes" .-> K["automatizations.json"]
     K -. "read by" .-> L["scheduler_loop()"]
     L -. "runs later" .-> J
@@ -195,7 +195,7 @@ Unknown tool names and tags that are never closed are **left as text**, not exec
 
 ## The tool catalog
 
-**150 tools**, grouped by what they are for. Each one returns a short string designed to be spoken, not raw JSON.
+**200 tools**, grouped by what they are for. Each one returns a short string designed to be spoken, not raw JSON.
 
 <details open>
 <summary><b>Time, weather & sky</b> · 21 tools</summary>
