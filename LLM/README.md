@@ -185,8 +185,9 @@ The parser is deliberately forgiving, because small models drift:
 | No arguments | `<get_time/>` |
 | Missing closing slash | `<get_weather; "Prague">` |
 | Lower or mixed case name | `<GET_WEATHER; "Prague"/>` |
+| Common alternate names | `<get_weather; city="Prague"/>` (`city` becomes `location`) |
 
-Unknown tool names and tags that are never closed are **left as text**, not executed. A tool that raises returns a speakable apology instead of crashing the turn.
+Unknown tool names and tags that are never closed are **left as text**, not executed. A tool that raises returns a speakable apology instead of crashing the turn. Arguments are fitted to the tool's real parameters, so an extra or misspelled name is dropped rather than breaking the call.
 
 > The OpenAI-style specs in `tools.py` are not sent as a native `tools` payload. They are the single source of truth used to render the text prompt, which is why any local model can play.
 
@@ -316,7 +317,7 @@ Unknown tool names and tags that are never closed are **left as text**, not exec
 |---|---|
 | `define_word` | Dictionary definition of an English word |
 | `wiki_summary` | Short encyclopedia summary of a topic |
-| `translate` | Translate English into another language |
+| `translate` | Translate between English and another language, in either direction |
 | `spell_word` | Spell a word letter by letter |
 | `morse_code` | Translate text into Morse code or Morse back into text |
 | `word_finder` | Synonyms, opposites, rhymes or similar-sounding words |
@@ -613,7 +614,7 @@ text, keep_listening = split_continue(reply)
 |---|---|---|
 | `tool_prompt()` | `str` | Renders the catalog for the system prompt |
 | `resolve_tool_tags(text)` | `(str, int)` | Replaces tags; returns the number of calls |
-| `call_tool(name, arguments)` | `str` | Calls one tool by name; accepts a dict or JSON |
+| `call_tool(name, arguments)` | `str` | Calls one tool by name; accepts a dict, JSON, or a single value |
 | `timer_loop(stop_event=None, handler=None, interval=1.0)` | `None` | Fires due timers and reminders |
 | `fire_due(now=None)` | `list` | Non-blocking check for due timers |
 
@@ -711,8 +712,10 @@ Restart the host after changing the catalog: tools and tags are built at import 
 ## Design notes
 
 - **Prompts are the API.** There is no native function calling and no hidden orchestration framework. The catalog, syntax and examples are plain text, which makes the behavior auditable and portable.
-- **The parser is intentionally lenient.** Small models forget closing slashes, switch quote styles and invent spacing. Accepting those variants keeps a 1.7B model usable without weakening execution safety.
+- **The parser is intentionally lenient.** Small models forget closing slashes, switch quote styles and invent spacing. Accepting those variants keeps a 1.7B model usable without weakening execution safety. Arguments are matched to the tool's real parameter names, and leftovers are ignored instead of crashing the turn.
 - **Internet text is inserted last.** Automation tags are resolved before tool tags, and tool output never gets a second pass. A malicious headline cannot become an executable tag.
+- **A busy service gets one more chance.** Every outbound HTTP call retries once on a rate limit, a server error or a dropped connection. A short pause is better than turning a temporary hiccup into an apology.
+- **Numbers from speech are forgiving.** `1,5` and `1.5` both mean one and a half, while `1,000` is a thousand, so locale habits and calculator habits both work.
 - **Errors are speakable.** A failing chat tool becomes a short apology. Weather errors deliberately omit the request URL because it contains the API key.
 - **State writes are crash-safe.** Every JSON store writes a temporary file and replaces the original, with locks around stores shared by multiple threads.
 - **Private by default.** The conversation goes to the endpoint configured in `LM_URL` — loopback or your own LAN. Only tool arguments (a city, a search term, a package name) leave your network, and only to the service that tool uses.

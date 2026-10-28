@@ -3,6 +3,7 @@ import base64
 import calendar
 import collections
 import html as _html
+import inspect
 import ipaddress
 import json
 import math
@@ -91,6 +92,30 @@ WEATHER_API_KEY = _env("WEATHER_API_KEY")
 WEATHER_BASE_URL = _env("WEATHER_BASE_URL", "https://api.weatherapi.com/v1").rstrip("/")
 NEWS_BASE_URL = _env("NEWS_BASE_URL", "https://news.google.com/rss").rstrip("/")
 
+# ---- shared HTTP helper ----------------------------------------------------
+_RETRY_STATUS = {429, 500, 502, 503, 504}
+_RETRY_DELAY = 0.4          # seconds between the two attempts
+
+
+def _req(method: str, url: str, **kwargs):
+    """Send one request, and retry it once after a short pause when the server hiccups.
+
+    One busy API or a single dropped connection should not turn a tool answer into
+    an apology. A 4xx (other than 429) is a real answer and is not retried.
+    """
+    for attempt in (0, 1):
+        try:
+            response = requests.request(method, url, **kwargs)
+        except requests.RequestException:
+            if attempt:
+                raise
+        else:
+            if attempt or response.status_code not in _RETRY_STATUS:
+                return response
+            response.close()
+        time.sleep(_RETRY_DELAY)
+    raise requests.ConnectionError("request failed")
+
 
 def get_weather(location: str = "") -> str:
     """Get the current weather for a location as a short, speech-friendly summary."""
@@ -105,7 +130,7 @@ def get_weather(location: str = "") -> str:
         "aqi": "no",
     }
     try:
-        response = requests.get(f"{WEATHER_BASE_URL}/current.json", params=params, timeout=10)
+        response = _req("GET", f"{WEATHER_BASE_URL}/current.json", params=params, timeout=10)
     except requests.RequestException:
         # Do not put the exception text in the answer: it contains the request URL, key included.
         return "Sorry, I could not reach the weather service"
@@ -225,7 +250,7 @@ def _fetch_news(topic: str = "", limit: int = 5) -> tuple:
     stories = []
     for variant in variants:
         try:
-            response = requests.get(url, params=variant, timeout=10)
+            response = _req("GET", url, params=variant, timeout=10)
         except requests.RequestException:
             return [], "Sorry, I could not reach the news service"
         if response.status_code != 200:
@@ -288,7 +313,7 @@ def _article_text(link: str) -> str:
     if not url.lower().startswith("http"):
         return ""
     try:
-        response = requests.get(url, headers=_BROWSER, timeout=10, stream=True)
+        response = _req("GET", url, headers=_BROWSER, timeout=10, stream=True)
     except requests.RequestException:
         return ""
     try:
@@ -970,7 +995,7 @@ WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", 
 def _get(url: str, params: dict = None, headers: dict = None):
     """GET a JSON document. Returns None on any failure (the key or URL never leaks into speech)."""
     try:
-        response = requests.get(url, params=params, headers={**UA, **(headers or {})}, timeout=10)
+        response = _req("GET", url, params=params, headers={**UA, **(headers or {})}, timeout=10)
         if response.status_code != 200:
             return None
         return response.json()
@@ -1190,9 +1215,8 @@ def _unit_key(name: str) -> str:
 
 def convert_units(value: str = "", from_unit: str = "", to_unit: str = "") -> str:
     """Convert between units of length, mass, volume, speed, area, time, data and temperature."""
-    try:
-        amount = float(str(value).replace(",", "").strip())
-    except ValueError:
+    amount = _amount(value)
+    if amount is None:
         return "Tell me the number to convert"
     a, b = _unit_key(from_unit), _unit_key(to_unit)
     if a in _TEMPS and b in _TEMPS:
@@ -1263,9 +1287,9 @@ def _rate(src: str, dst: str):
 
 def convert_currency(amount: str = "1", from_currency: str = "", to_currency: str = "") -> str:
     """Convert money using the European Central Bank rates."""
-    try:
-        value = float(str(amount).replace(",", "").strip() or 1)
-    except ValueError:
+    raw = "" if amount is None else str(amount).strip()
+    value = _amount(raw) if raw else 1.0
+    if value is None:
         return "Tell me the amount to convert"
     src, dst = _currency_code(from_currency), _currency_code(to_currency)
     if not src or not dst:
@@ -1368,21 +1392,33 @@ _LANGUAGES = {"czech": "cs", "german": "de", "french": "fr", "spanish": "es", "i
               "english": "en"}
 
 
-def translate(text: str = "", language: str = "") -> str:
-    """Translate English text into another language."""
+def translate(text: str = "", language: str = "", from_language: str = "") -> str:
+    """Translate text from English into another language, or from another language back into English."""
     text = (text or "").strip()[:500]
     low = (language or "").strip().lower()
+    source = (from_language or "english").strip().lower()
     code = _LANGUAGES.get(low) or (low if re.fullmatch(r"[a-z]{2}", low) else None)
-    if not text or not code:
-        return "Tell me what to translate and into which language"
-    data = _get("https://api.mymemory.translated.net/get", {"q": text, "langpair": f"en|{code}"})
+    source_code = _LANGUAGES.get(source) or (source if re.fullmatch(r"[a-z]{2}", source) else None)
+    if not text:
+        return "Tell me what to translate"
+    if not code:
+        return "Tell me which language to translate into"
+    if not source_code:
+        return f"Sorry, I do not know the language {from_language}"
+    if source_code == code:
+        name = low.title() if low in _LANGUAGES else code
+        if code == "en":
+            return "That is already English, so tell me which language you want it in"
+        return f"That is already {name}"
+    data = _get("https://api.mymemory.translated.net/get", {"q": text, "langpair": f"{source_code}|{code}"})
     try:
         if int(data["responseStatus"]) != 200:
             raise ValueError
         result = data["responseData"]["translatedText"].strip()
     except (TypeError, KeyError, ValueError):
         return "Sorry, the translation service did not answer"
-    return f"in {low.title() if low in _LANGUAGES else code} that is {result}"
+    name = low.title() if low in _LANGUAGES else code
+    return f"in {name} that is {result}"
 
 
 def spell_word(word: str = "") -> str:
@@ -2104,9 +2140,8 @@ def _money(x: float) -> str:
 
 def tip_split(bill: str = "", tip_percent: str = "", people: str = "1") -> str:
     """Tip and per-person share of a restaurant bill."""
-    try:
-        total = float(re.search(r"\d+(?:\.\d+)?", str(bill).replace(",", "")).group())
-    except (AttributeError, ValueError):
+    total = _amount(bill)
+    if total is None or total <= 0:
         return "Tell me the amount of the bill"
     try:
         pct = float(re.search(r"\d+(?:\.\d+)?", str(tip_percent)).group()) if str(tip_percent or "").strip() else float(_env("DEFAULT_TIP", "10"))
@@ -2541,11 +2576,13 @@ def remove_birthday(name: str = "") -> str:
 
 # ---- expenses ----------------------------------------------------------------
 def _amount(text: str):
-    found = re.search(r"\d[\d.,]*", str(text or ""))
+    raw_text = "" if text is None else str(text)
+    found = re.search(r"-?\d[\d.,]*", raw_text)
     if not found:
         return None
     raw = found.group(0).rstrip(".,")
-    raw = raw.replace(",", ".") if re.fullmatch(r"\d+,\d{1,2}", raw) else raw.replace(",", "")
+    # 1,5 is a decimal comma; 1,000 is a thousands separator (the usual European mix)
+    raw = re.sub(r"(?<=\d),(?=\d{1,2}(?!\d))", ".", raw).replace(",", "")
     try:
         return float(raw)
     except ValueError:
@@ -2762,7 +2799,7 @@ def _reverse_place(latitude, longitude) -> str:
 def _post_json(url: str, payload: dict, headers: dict = None):
     """POST a JSON document. Returns None on any failure, like _get."""
     try:
-        response = requests.post(url, json=payload, headers={**UA, **(headers or {})}, timeout=15)
+        response = _req("POST", url, json=payload, headers={**UA, **(headers or {})}, timeout=15)
         if response.status_code != 200:
             return None
         return response.json()
@@ -3351,7 +3388,7 @@ def daily_calories(weight: str = "", height: str = "", age: str = "", sex: str =
 
 
 def _distance_km(text: str):
-    low = " ".join(str(text or "").lower().replace(",", "").split())
+    low = " ".join(str(text or "").lower().split())
     if not low:
         return None
     if "half marathon" in low or "half-marathon" in low:
@@ -3473,6 +3510,8 @@ def add_event(title: str = "", when: str = "") -> str:
         return "Sorry, I did not understand when. Try tomorrow at 3 PM or October 30 at 6 PM"
     if d < date.today():
         return "That date is already in the past"
+    if d == date.today() and at and at <= (datetime.now().hour, datetime.now().minute):
+        return f"{_clock(*at)} has already passed today"
     with _DATA_LOCK:
         data = _data_load()
         keep = [e for e in _events(data) if e["date"] >= (date.today() - timedelta(days=30)).isoformat()]
@@ -3954,8 +3993,11 @@ def _tool(name: str, description: str, properties: dict = None, required: list =
     }
 
 
-def _text(description: str) -> dict:
-    return {"type": "string", "description": description}
+def _text(description: str, example: str = None) -> dict:
+    prop = {"type": "string", "description": description}
+    if example is not None:
+        prop["example"] = example
+    return prop
 
 
 TOOLS.extend([
@@ -4038,9 +4080,12 @@ _EXTRA_SPECS = [
           "'what is ...', 'tell me about ...' when it is a factual topic.",
           {"topic": _text("What to look up, e.g. 'Marie Curie'."),
            "detail": _text("How much, e.g. 'short'. Use 'long' when the user wants to hear more.")}, ["topic"]),
-    _tool("translate", "Translate English into another language. Use for 'how do you say ... in German', 'translate ... to Czech'.",
-          {"text": _text("The English text, e.g. 'where is the train station'."),
-           "language": _text("Target language, e.g. 'German'. Also: 'Czech', 'French', 'Japanese'.")},
+    _tool("translate", "Translate between English and another language, in either direction. Use for 'how do you say ... "
+          "in German', 'translate ... to Czech', or 'what does this German sentence mean'.",
+          {"text": _text("The text to translate, e.g. 'where is the train station'."),
+           "language": _text("Target language, e.g. 'German'. Also: 'Czech', 'French', 'Japanese'."),
+           "from_language": _text("Source language when it is not English, e.g. 'German'. "
+                                  "Leave empty when translating from English.", "")},
           ["text", "language"]),
     _tool("spell_word", "Spell a word letter by letter. Use for 'how do you spell ...', 'spell ...'.",
           {"word": _text("The word, e.g. 'necessary'.")}, ["word"]),
@@ -4306,8 +4351,9 @@ _EXTRA_SPECS.extend(_MORE_SPECS2)
 # ---------------------------------------------------------------------------
 
 def _floats(text) -> list:
-    """All numbers in a text. Thousands separators ('1,200') are removed first."""
-    cleaned = re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", str(text or ""))
+    """All numbers in a text. Both 1,5 and 1.5 are decimals; 1,000 is a thousand."""
+    cleaned = re.sub(r"(?<=\d),(?=\d{1,2}(?!\d))", ".", str(text or ""))
+    cleaned = re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", cleaned)
     return [float(m) for m in re.findall(r"-?\d+(?:\.\d+)?", cleaned)]
 
 
@@ -4930,8 +4976,9 @@ def download_time(size: str = "", speed: str = "") -> str:
 
 def hourly_wage(amount: str = "", period: str = "hour", hours_per_week: str = "40") -> str:
     """Convert pay between hourly, weekly, monthly and yearly."""
-    m = re.search(r"(\d+(?:\.\d+)?)\s*(k|thousand|m|million)?\b",
-                  re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", str(amount or "").lower()))
+    cleaned = re.sub(r"(?<=\d),(?=\d{1,2}(?!\d))", ".", str(amount or "").lower())
+    cleaned = re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", cleaned)
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(k|thousand|m|million)?\b", cleaned)
     if not m:
         return "Tell me the amount, like 30 an hour or 60 thousand a year"
     value = float(m.group(1)) * {"k": 1e3, "thousand": 1e3, "m": 1e6, "million": 1e6}.get(m.group(2), 1)
@@ -5082,8 +5129,9 @@ def _parse_fraction(text: str):
 
 
 def _big_amount(text):
-    """'5000', '50k', '1.5 million' -> a float, or None."""
-    s = re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", str(text or "").lower())
+    """'5000', '50k', '1.5 million', '1,5 million' -> a float, or None."""
+    s = re.sub(r"(?<=\d),(?=\d{1,2}(?!\d))", ".", str(text or "").lower())
+    s = re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", s)
     m = re.search(r"(\d+(?:\.\d+)?)\s*(k|thousand|m|million)?\b", s)
     if not m:
         return None
@@ -6501,6 +6549,93 @@ def _parse_args(raw: str):
     return args, kwargs
 
 
+# Common names small models use instead of the parameter names in the catalog.
+# Each alias lists the catalog names it may stand for, best first; only a name
+# the function really has can win.
+_PARAM_ALIASES = {
+    "city": ("location", "from_place", "to_place"),
+    "place": ("location", "from_place", "to_place"),
+    "town": ("location", "from_place", "to_place"),
+    "where": ("location", "from_place", "to_place"),
+    "query": ("topic", "search", "question", "text", "word", "target"),
+    "q": ("topic", "query", "text", "word", "target"),
+    "search": ("topic", "query", "text", "word", "target"),
+    "subject": ("topic", "title"), "about": ("topic", "title"),
+    "lang": ("language",), "target": ("language", "to"),
+    "to": ("to_unit", "to_place", "to_currency", "language"),
+    "source": ("from_language", "from_place", "from_unit", "from_currency", "from_base"),
+    "from": ("from_language", "from_place", "from_unit", "from_currency", "from_base"),
+    "from_lang": ("from_language",),
+    "message": ("text", "message", "title"), "msg": ("text", "message"),
+    "phrase": ("text", "word"), "sentence": ("text",),
+    "event": ("title",), "name": ("title",),
+    "time": ("when", "time_text", "duration"),
+    "date": ("when", "date_text", "day"), "at": ("when", "time_text"),
+    "number": ("value", "count", "number"),
+    "num": ("number", "value", "count"), "n": ("number", "value", "count"),
+    "count": ("count", "number", "value"),
+    "amount": ("value", "amount", "number"), "value": ("number", "value", "amount"),
+    "term": ("word", "text"), "link": ("url", "link"),
+}
+
+
+def _string_arg(value) -> str:
+    """Turn a parsed tag value into the plain string the tools expect."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, (list, tuple)):
+        return ", ".join(_string_arg(item) for item in value)
+    if isinstance(value, dict):
+        return ", ".join(f"{key} {_string_arg(item)}" for key, item in value.items())
+    return str(value)
+
+
+def _prepare_arguments(function, args, kwargs) -> dict:
+    """Fit tag arguments to the tool's real parameters.
+
+    Positional arguments fill the parameters in order, common alternate names
+    ("city" for "location") are translated, values become strings, and anything
+    the function does not accept is dropped instead of raising TypeError.
+    """
+    try:
+        parameters = [p for p in inspect.signature(function).parameters.values()
+                      if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)]
+    except (TypeError, ValueError):
+        return {str(key): _string_arg(value) for key, value in (kwargs or {}).items()}
+    names = [p.name for p in parameters]
+    prepared = {}
+    for name, value in zip(names, args or ()):
+        prepared[name] = _string_arg(value)
+    for key, value in (kwargs or {}).items():
+        key = str(key)
+        if key not in names:
+            alias = next((candidate for candidate in _PARAM_ALIASES.get(key.lower(), ())
+                          if candidate in names and candidate not in prepared), "")
+            if not alias:
+                continue
+            key = alias
+        if key not in prepared:
+            prepared[key] = _string_arg(value)
+    return prepared
+
+
+def _call_tool_function(name: str, args, kwargs):
+    """Run one tool with forgiving arguments; return (text, error)."""
+    function = TOOL_FUNCTIONS.get(name)
+    if function is None:
+        return None, f"no tool named {name}"
+    try:
+        return str(function(**_prepare_arguments(function, args, kwargs))), ""
+    except Exception as exc:
+        return None, str(exc) or exc.__class__.__name__
+
+
 def _find_tool_tags(text: str) -> list:
     """Return (start, end, name, raw_arguments) for every tool tag in text.
 
@@ -6556,9 +6691,8 @@ def resolve_tool_tags(text: str) -> tuple:
         raw = re.sub(r"^[;,]\s*", "", raw.strip())  # the separator after the name
         args, kwargs = _parse_args(raw)
         calls += 1
-        try:
-            result = str(function(*args, **kwargs))
-        except Exception:
+        result, error = _call_tool_function(name, args, kwargs)
+        if error:
             result = f"Sorry, I could not get that ({name.replace('_', ' ')} failed)"
         pieces.append(text[last:start])
         pieces.append(result)
@@ -6568,8 +6702,14 @@ def resolve_tool_tags(text: str) -> tuple:
 
 
 def example_value(prop: dict) -> str:
-    """First e.g. 'sample' found in a parameter description, for prompt examples."""
-    match = re.search(r"e\.g\.\s+'([^']+)'", prop.get("description", ""))
+    """Best sample value for a prompt example: an explicit example, then the first e.g. 'sample'."""
+    if "example" in prop:
+        return prop["example"]
+    text = prop.get("description", "")
+    match = (re.search(r"e\.g\.\s*'([^']+)'", text)
+             or re.search(r"e\.g\.\s*\"([^\"]+)\"", text)
+             or re.search(r"'([^']+)'", text)
+             or re.search(r"\"([^\"]+)\"", text))
     return match.group(1) if match else "value"
 
 
@@ -6586,9 +6726,6 @@ def tool_prompt() -> str:
         'User: What is Meta Quest? You: <wiki_summary; topic="Meta Quest"/>',
         "These tags are the ONLY way to call a tool. Never write <tool_call>, <function=...>, "
         "<parameter=...> or [tool(...)]: those are not understood and would be read aloud.",
-        "You can call tools by writing a tag inside your answer; the tag is ",
-        "replaced by the real tool result before the user sees your message.",
-        'Example: Right now in Prague it is <get_weather; "Prague"/>',
         "Write your whole answer as plain text with the tag exactly where the "
         "result belongs. Never guess tool data and never write a tool's result "
         "yourself. Whenever the user asks for the weather, the time or the news, "
@@ -6621,22 +6758,31 @@ def tool_prompt() -> str:
 
 
 def call_tool(name: str, arguments) -> str:
-    """Run one tool call by name. Arguments may be a dict or a JSON string.
+    """Run one tool call by name. Arguments may be a dict, a JSON string, or a value.
 
+    Arguments are fitted to the tool's real parameters, so a common alternate
+    name ("city" for "location") or an extra value does not break the call.
     Always returns a string so it can be sent straight back to the LLM.
     """
     if isinstance(arguments, str):
         try:
             arguments = json.loads(arguments or "{}")
         except json.JSONDecodeError:
-            return f"Error: could not parse arguments for {name}: {arguments!r}"
-    function = TOOL_FUNCTIONS.get(name)
-    if function is None:
+            arguments = [arguments]
+    if isinstance(arguments, dict):
+        args, kwargs = [], arguments
+    elif isinstance(arguments, (list, tuple)):
+        args, kwargs = list(arguments), {}
+    elif arguments is None:
+        args, kwargs = [], {}
+    else:
+        args, kwargs = [arguments], {}
+    if name not in TOOL_FUNCTIONS:
         return f"Error: no tool named '{name}' is available."
-    try:
-        return str(function(**(arguments or {})))
-    except Exception as exc:
-        return f"Error: {name} failed ({exc})."
+    result, error = _call_tool_function(name, args, kwargs)
+    if error:
+        return f"Error: {name} failed ({error})."
+    return result
 
 
 if __name__ == "__main__":
