@@ -2,6 +2,8 @@ import ast
 import base64
 import calendar
 import collections
+import colorsys
+import hashlib
 import html as _html
 import inspect
 import ipaddress
@@ -19,11 +21,12 @@ import statistics
 import threading
 import time
 import uuid
+import webbrowser
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from fractions import Fraction
 from pathlib import Path
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import quote, unquote, urljoin, urlparse
 from xml.etree import ElementTree
 
 import requests
@@ -6327,6 +6330,1340 @@ _MORE_SPECS4 = [
 _EXTRA_SPECS.extend(_MORE_SPECS4)
 
 
+# =============================================================================
+# MORE TOOLS: memory, PC, text and code, science, money, health, internet
+# (speech-friendly functions; specs are in _MORE_SPECS5 below)
+# =============================================================================
+def _x_words(text) -> list:
+    return [w for w in re.findall(r"\w+", (text or "").lower()) if len(w) > 2]
+
+
+def _x_duration(seconds: float) -> str:
+    seconds = float(seconds)
+    if seconds < 1:
+        return "less than a second"
+    if seconds < 60:
+        return f"{seconds:.1f} seconds" if seconds < 10 else f"{round(seconds)} seconds"
+    parts = []
+    for name, size in (("year", 31557600), ("day", 86400), ("hour", 3600), ("minute", 60)):
+        if seconds >= size:
+            n = int(seconds // size)
+            seconds -= n * size
+            parts.append(f"{_num(n)} {name}{'' if n == 1 else 's'}")
+        if len(parts) == 2:
+            break
+    return _join(parts)
+
+
+def _x_when_days(d: date) -> str:
+    n = (d - date.today()).days
+    label = d.strftime("%A, %B ") + str(d.day)
+    if n == 0:
+        return f"today, {label}"
+    if n == 1:
+        return f"tomorrow, {label}"
+    if n > 1:
+        return f"in {n} days, on {label}"
+    return f"on {label}"
+
+
+# ---- A. personal memory and tracking ---------------------------------------
+def remember_fact(fact: str = "") -> str:
+    fact = (fact or "").strip()
+    if not fact:
+        return "Tell me what to remember"
+    with _DATA_LOCK:
+        data = _data_load()
+        facts = [f for f in data.get("facts", []) if isinstance(f, dict)]
+        facts.append({"text": fact, "time": time.time()})
+        data["facts"] = facts[-500:]
+        _data_save(data)
+    return "Okay, I will remember that"
+
+
+def recall_fact(query: str = "") -> str:
+    with _DATA_LOCK:
+        facts = [f for f in _data_load().get("facts", []) if isinstance(f, dict) and f.get("text")]
+    if not facts:
+        return "You have not asked me to remember anything yet"
+    words = _x_words(query)
+    if not words:
+        return "I remember: " + "; ".join(f["text"] for f in facts[-3:])
+    scored = sorted(((sum(w in f["text"].lower() for w in words), i, f) for i, f in enumerate(facts)),
+                    key=lambda t: (t[0], t[1]), reverse=True)
+    hits = [f for score, _, f in scored if score > 0][:3]
+    if not hits:
+        return f"I do not remember anything about {query.strip()}"
+    return "I remember: " + "; ".join(f["text"] for f in hits)
+
+
+def save_contact(name: str = "", phone: str = "", email: str = "") -> str:
+    name, phone, email = (name or "").strip(), (phone or "").strip(), (email or "").strip()
+    if not name or not (phone or email):
+        return "Tell me the name and a phone number or an email"
+    with _DATA_LOCK:
+        data = _data_load()
+        contacts = data.get("contacts") if isinstance(data.get("contacts"), dict) else {}
+        entry = contacts.get(name.lower(), {"name": name.title()})
+        if phone:
+            entry["phone"] = phone
+        if email:
+            entry["email"] = email
+        contacts[name.lower()] = entry
+        data["contacts"] = contacts
+        _data_save(data)
+    return f"Okay, I saved the contact {name.title()}"
+
+
+def get_contact(name: str = "") -> str:
+    name = (name or "").strip().lower()
+    with _DATA_LOCK:
+        contacts = _data_load().get("contacts")
+    contacts = contacts if isinstance(contacts, dict) else {}
+    if not contacts:
+        return "You have no saved contacts"
+    if not name:
+        return "Tell me whose contact you want"
+    found = contacts.get(name) or next((c for k, c in contacts.items() if name in k or k in name), None)
+    if not found:
+        return f"I have no contact named {name.title()}"
+    bits = [f"phone {found['phone']}"] if found.get("phone") else []
+    bits += [f"email {found['email']}"] if found.get("email") else []
+    return f"{found.get('name', name.title())}: " + ", ".join(bits)
+
+
+def log_mood(mood: str = "", note: str = "") -> str:
+    value = _amount(mood)
+    if value is None or not 1 <= value <= 10:
+        return "Tell me your mood as a number from 1 to 10"
+    today = date.today().isoformat()
+    with _DATA_LOCK:
+        data = _data_load()
+        log = [e for e in data.get("moods", []) if isinstance(e, dict) and e.get("d") != today]
+        log.append({"d": today, "m": value, "note": (note or "").strip()})
+        data["moods"] = log[-1000:]
+        _data_save(data)
+    return f"Okay, I wrote down a mood of {_num(value)} out of 10 for today"
+
+
+def mood_trend(period: str = "week") -> str:
+    low = (period or "week").lower()
+    days = 30 if "month" in low else 365 if "year" in low else 7
+    label = "month" if days == 30 else "year" if days == 365 else "week"
+    cutoff = date.today() - timedelta(days=days)
+    with _DATA_LOCK:
+        raw = [e for e in _data_load().get("moods", []) if isinstance(e, dict)]
+    log = []
+    for e in raw:
+        try:
+            d = date.fromisoformat(e["d"])
+            if d > cutoff:
+                log.append((d, float(e["m"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    if not log:
+        return f"I have no mood entries for the last {label}"
+    avg = sum(m for _, m in log) / len(log)
+    best, worst = max(log, key=lambda t: t[1]), min(log, key=lambda t: t[1])
+    text = f"Your average mood over the last {label} was {_num(round(avg, 1))} out of 10 from {len(log)} entries"
+    if len(log) > 1 and best[1] != worst[1]:
+        text += f". Best was {best[0].strftime('%A')} with {_num(best[1])}, lowest was {worst[0].strftime('%A')} with {_num(worst[1])}"
+    return text
+
+
+def _x_balances(data: dict) -> dict:
+    totals = {}
+    for e in data.get("debts", []):
+        if isinstance(e, dict) and e.get("who"):
+            who = str(e["who"]).strip()
+            totals.setdefault(who.lower(), [who.title(), 0.0])[1] += float(e.get("amt", 0))
+    return totals
+
+
+def _x_balance_text(display: str, balance: float) -> str:
+    if abs(balance) < 0.005:
+        return f"you and {display} are all settled"
+    return f"{display} owes you {_spent(balance)}" if balance > 0 else f"you owe {display} {_spent(-balance)}"
+
+
+def log_debt(who: str = "", amount: str = "", direction: str = "owes me") -> str:
+    who, low = (who or "").strip(), (direction or "").lower()
+    if not who:
+        return "Tell me who it is about"
+    settle = bool(re.search(r"\b(settle|settled|paid|pay|repaid|repay|returned|back|clear|cleared)\b", low))
+    owe = bool(re.search(r"\bi\s+owe\b|\bi_owe\b|\bowe them\b|\bborrowed\b", low))
+    value = _amount(amount)
+    if value is not None and value <= 0:
+        value = None
+    with _DATA_LOCK:
+        data = _data_load()
+        debts = [e for e in data.get("debts", []) if isinstance(e, dict)]
+        display, balance = _x_balances(data).get(who.lower(), [who.title(), 0.0])
+        if settle:
+            if abs(balance) < 0.005:
+                return f"Nothing is open with {display}"
+            pay = abs(balance) if value is None else min(value, abs(balance))
+            entry = -math.copysign(pay, balance)
+        else:
+            if value is None:
+                return "Tell me how much"
+            entry = -value if owe else value
+        debts.append({"who": display, "amt": entry, "d": date.today().isoformat()})
+        data["debts"] = debts[-1000:]
+        _data_save(data)
+    return f"Okay. Now {_x_balance_text(display, balance + entry)}"
+
+
+def debts_summary(who: str = "") -> str:
+    with _DATA_LOCK:
+        totals = _x_balances(_data_load())
+    open_ = {k: v for k, v in totals.items() if abs(v[1]) >= 0.005}
+    who = (who or "").strip().lower()
+    if who:
+        item = open_.get(who) or next((v for k, v in open_.items() if who in k), None)
+        return _x_balance_text(item[0], item[1]).capitalize() if item else f"Nothing is open with {who.title()}"
+    if not open_:
+        return "Nobody owes anything right now"
+    lines = [_x_balance_text(n, b) for n, b in sorted(open_.values(), key=lambda v: -abs(v[1]))[:5]]
+    return _join(lines).capitalize()
+
+
+def _x_monthly(price: float, cycle: str) -> float:
+    low = (cycle or "monthly").lower()
+    if "week" in low:
+        return price * 52 / 12
+    if "quarter" in low:
+        return price / 3
+    if "year" in low or "annual" in low:
+        return price / 12
+    return price
+
+
+def add_subscription(name: str = "", price: str = "", cycle: str = "monthly") -> str:
+    name = (name or "").strip()
+    if not name:
+        return "Tell me which subscription"
+    with _DATA_LOCK:
+        data = _data_load()
+        subs = [s for s in data.get("subs", []) if isinstance(s, dict)]
+        if re.search(r"\b(cancel|cancelled|remove|delete|stop)\b", (price or "").lower()):
+            kept = [s for s in subs if s.get("name", "").lower() != name.lower()]
+            data["subs"] = kept
+            _data_save(data)
+            return f"Okay, I removed {name.title()}" if len(kept) != len(subs) else f"I had no subscription called {name.title()}"
+        value = _amount(price)
+        if value is None or value < 0:
+            return "Tell me what it costs"
+        low = (cycle or "").lower()
+        canon = "weekly" if "week" in low else "quarterly" if "quarter" in low else "yearly" if re.search(r"year|annual", low) else "monthly"
+        subs = [s for s in subs if s.get("name", "").lower() != name.lower()]
+        subs.append({"name": name.title(), "price": value, "cycle": canon})
+        data["subs"] = subs
+        _data_save(data)
+    return f"Okay, {name.title()} for {_spent(value)} {canon} is saved"
+
+
+def subscriptions_total() -> str:
+    with _DATA_LOCK:
+        subs = [s for s in _data_load().get("subs", []) if isinstance(s, dict) and "price" in s]
+    if not subs:
+        return "You have no subscriptions saved"
+    costs = sorted(((_x_monthly(float(s["price"]), s.get("cycle", "")), s["name"]) for s in subs), reverse=True)
+    monthly = sum(c for c, _ in costs)
+    top = _join([f"{n} at {_spent(c)}" for c, n in costs[:3]])
+    return (f"You have {len(subs)} subscription{'' if len(subs) == 1 else 's'} costing {_spent(monthly)} a month, "
+            f"or {_spent(monthly * 12)} a year. The biggest {'is' if len(costs[:3]) == 1 else 'are'} {top}")
+
+
+def _x_month_spent(data: dict, category: str = "") -> float:
+    first, total = date.today().replace(day=1), 0.0
+    for e in data.get("expenses", []):
+        if not isinstance(e, dict):
+            continue
+        try:
+            d = date.fromtimestamp(e["time"])
+            if d >= first and (not category or e.get("category") == category):
+                total += float(e.get("amount", 0))
+        except (KeyError, TypeError, ValueError, OverflowError, OSError):
+            continue
+    return total
+
+
+def _x_budget_key(category: str) -> str:
+    low = (category or "").strip().lower()
+    return "total" if low in ("", "total", "all", "overall", "everything") else low
+
+
+def set_budget(category: str = "", amount: str = "") -> str:
+    value, key = _amount(amount), _x_budget_key(category)
+    if value is None or value <= 0:
+        return "Tell me the monthly amount for the budget"
+    with _DATA_LOCK:
+        data = _data_load()
+        budgets = data.get("budgets") if isinstance(data.get("budgets"), dict) else {}
+        budgets[key] = value
+        data["budgets"] = budgets
+        _data_save(data)
+    return f"Okay, your monthly {'budget' if key == 'total' else key + ' budget'} is {_spent(value)}"
+
+
+def budget_status(category: str = "") -> str:
+    with _DATA_LOCK:
+        data = _data_load()
+    budgets = data.get("budgets") if isinstance(data.get("budgets"), dict) else {}
+    if not budgets:
+        return "You have not set a budget yet"
+    key = _x_budget_key(category)
+    keys = [key] if (category or "").strip() else list(budgets)[:4]
+    lines = []
+    for k in keys:
+        if k not in budgets:
+            spent = _x_month_spent(data, "" if k == "total" else k)
+            lines.append(f"you have no {k} budget, and spent {_spent(spent)} this month")
+            continue
+        spent, limit = _x_month_spent(data, "" if k == "total" else k), float(budgets[k])
+        name = "overall" if k == "total" else k
+        left = limit - spent
+        tail = f"{_spent(left)} left" if left >= 0 else f"over by {_spent(-left)}"
+        lines.append(f"{name}: {_spent(spent)} of {_spent(limit)} spent, {tail}")
+    return "This month, " + "; ".join(lines)
+
+
+# ---- B. PC and system ------------------------------------------------------
+_X_MEDIA = {"play": 0xB3, "pause": 0xB3, "toggle": 0xB3, "resume": 0xB3, "next": 0xB0, "skip": 0xB0,
+            "previous": 0xB1, "back": 0xB1, "stop": 0xB2, "mute": 0xAD}
+_X_PLAYERCTL = {0xB3: "play-pause", 0xB0: "next", 0xB1: "previous", 0xB2: "stop"}
+
+
+def media_control(action: str = "") -> str:
+    low = (action or "").lower()
+    key = next((_X_MEDIA[w] for w in re.findall(r"[a-z]+", low) if w in _X_MEDIA), None)
+    if key is None:
+        return "Say play, pause, next, previous, stop or mute"
+    if os.name == "nt":
+        import ctypes
+        ctypes.windll.user32.keybd_event(key, 0, 0, 0)
+        ctypes.windll.user32.keybd_event(key, 0, 2, 0)
+        return "Done"
+    if shutil.which("playerctl") and key in _X_PLAYERCTL:
+        import subprocess
+        subprocess.run(["playerctl", _X_PLAYERCTL[key]], timeout=5, check=False)
+        return "Done"
+    return "I cannot control media on this computer"
+
+
+_X_SITES = {"youtube": "https://www.youtube.com", "gmail": "https://mail.google.com", "google": "https://www.google.com",
+            "github": "https://github.com", "maps": "https://maps.google.com", "wikipedia": "https://www.wikipedia.org",
+            "news": "https://news.google.com", "calendar": "https://calendar.google.com",
+            "drive": "https://drive.google.com", "spotify": "https://open.spotify.com"}
+
+
+def open_website(site: str = "") -> str:
+    name = (site or "").strip().lower()
+    if not name:
+        return "Tell me which website to open"
+    sites = dict(_X_SITES)
+    for pair in _env("OPEN_SITES").split(","):
+        if "=" in pair:
+            k, v = pair.split("=", 1)
+            sites[k.strip().lower()] = v.strip()
+    url = sites.get(name) or sites.get(name.replace(" ", ""))
+    if not url and _env("OPEN_ANY_SITE") == "1":
+        candidate = name if "://" in name else "https://" + name.replace(" ", "")
+        host = urlparse(candidate).hostname or ""
+        if urlparse(candidate).scheme in ("http", "https") and "." in host:
+            url = candidate
+    if not url or urlparse(url).scheme not in ("http", "https"):
+        return f"I am not allowed to open {site.strip()}. Add it to OPEN_SITES in the settings"
+    try:
+        opened = webbrowser.open(url)
+    except webbrowser.Error:
+        opened = False
+    return f"Opening {name.title()}" if opened else "I could not open a browser on this computer"
+
+
+def local_ip() -> str:
+    ip = ""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("10.255.255.255", 1))
+        ip = sock.getsockname()[0]
+    except OSError:
+        try:
+            ip = socket.gethostbyname(socket.gethostname())
+        except OSError:
+            ip = ""
+    finally:
+        sock.close()
+    return f"The local address of this computer is {ip}" if ip else "I could not find the local address"
+
+
+def top_processes(by: str = "memory", count: str = "3") -> str:
+    try:
+        import psutil
+    except ImportError:
+        return "I need the psutil package for that"
+    n = int(min(5, max(1, _amount(count) or 3)))
+    use_cpu = "cpu" in (by or "").lower() or "processor" in (by or "").lower()
+    procs = []
+    for p in psutil.process_iter(["name", "pid"]):
+        try:
+            if use_cpu:
+                p.cpu_percent(None)
+            procs.append(p)
+        except psutil.Error:
+            continue
+    if use_cpu:
+        time.sleep(0.6)
+    totals = {}
+    cores = psutil.cpu_count() or 1
+    for p in procs:
+        try:
+            if not p.info["pid"]:
+                continue
+            value = p.cpu_percent(None) / cores if use_cpu else p.memory_percent()
+            name = re.sub(r"\.exe$", "", p.info["name"] or "unknown", flags=re.I)
+            totals[name] = totals.get(name, 0.0) + value
+        except psutil.Error:
+            continue
+    top = sorted(((v, k) for k, v in totals.items() if k.lower() != "system idle process"), reverse=True)[:n]
+    if not top:
+        return "I could not read the process list"
+    return f"Most {'processor' if use_cpu else 'memory'} use: " + _join([f"{k} at {_num(round(v, 1))} percent" for v, k in top])
+
+
+def find_file(name: str = "", folder: str = "") -> str:
+    tokens = [t for t in re.findall(r"\w+", (name or "").lower()) if t]
+    if not tokens:
+        return "Tell me which file to look for"
+    home = Path.home()
+    root = home
+    wanted = (folder or "").strip().lower()
+    if wanted:
+        try:
+            root = next((p for p in home.iterdir() if p.is_dir() and p.name.lower() == wanted), home)
+        except OSError:
+            root = home
+    skip = {"node_modules", "appdata", "site-packages", "__pycache__", "venv", "library", ".git", "windows", "$recycle.bin"}
+    deadline, found = time.time() + 6, []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".") and d.lower() not in skip]
+        for fn in filenames:
+            low = fn.lower()
+            if all(t in low for t in tokens):
+                found.append((fn, Path(dirpath).name))
+        if len(found) >= 5 or time.time() > deadline:
+            break
+    if not found:
+        return f"I found no file matching {name.strip()}"
+    shown = _join([f"{fn} in {parent}" for fn, parent in found[:3]])
+    return f"I found {len(found)}{'+' if len(found) >= 5 else ''} file{'' if len(found) == 1 else 's'}: {shown}"
+
+
+# ---- C. text and code utilities --------------------------------------------
+def word_count(text: str = "") -> str:
+    text = text or ""
+    words = len(re.findall(r"[\w'’-]+", text))
+    if not words:
+        return "Give me some text to count"
+    chars = len(text.strip())
+    sentences = max(1, len(re.findall(r"[.!?]+(?:\s|$)", text.strip())))
+    return (f"{_num(words)} words, {_num(chars)} characters and {sentences} sentence{'' if sentences == 1 else 's'}. "
+            f"Reading it takes about {_x_duration(max(1, words / 200 * 60))}")
+
+
+def _x_split_words(text: str) -> list:
+    return re.findall(r"[A-Za-z0-9]+", re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text or ""))
+
+
+def change_case(text: str = "", style: str = "upper") -> str:
+    text, low = text or "", (style or "upper").lower()
+    parts = [w.lower() for w in _x_split_words(text)]
+    if not text.strip():
+        return "Give me some text to change"
+    if "snake" in low:
+        out, label = "_".join(parts), "snake case"
+    elif "kebab" in low or "dash" in low:
+        out, label = "-".join(parts), "kebab case"
+    elif "constant" in low:
+        out, label = "_".join(parts).upper(), "constant case"
+    elif "pascal" in low or "upper camel" in low:
+        out, label = "".join(w.capitalize() for w in parts), "Pascal case"
+    elif "camel" in low:
+        out, label = (parts[0] + "".join(w.capitalize() for w in parts[1:])) if parts else "", "camel case"
+    elif "lower" in low:
+        out, label = text.lower(), "lower case"
+    elif "title" in low:
+        out, label = text.title(), "title case"
+    elif "sentence" in low:
+        out, label = text.strip().capitalize(), "sentence case"
+    else:
+        out, label = text.upper(), "upper case"
+    return f"In {label}: {out}"
+
+
+def caesar_cipher(text: str = "", shift: str = "13", mode: str = "encode") -> str:
+    if not (text or "").strip():
+        return "Give me the text"
+    amount = 13 if "rot" in (shift or "").lower() and not re.search(r"\d", shift) else int(_amount(shift) or 13)
+    if re.search(r"decode|decrypt|undo", (mode or "").lower()):
+        amount = -amount
+
+    def move(ch):
+        if ch.isascii() and ch.isalpha():
+            base = ord("A") if ch.isupper() else ord("a")
+            return chr((ord(ch) - base + amount) % 26 + base)
+        return ch
+    return "".join(move(c) for c in text)
+
+
+def base64_tool(text: str = "", mode: str = "encode") -> str:
+    if not (text or "").strip():
+        return "Give me the text"
+    if re.search(r"decode|decrypt", (mode or "").lower()):
+        try:
+            out = base64.b64decode(text.strip(), validate=True).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return "That is not valid Base64 text"
+        return f"Decoded: {out[:300]}"
+    return base64.b64encode(text.encode("utf-8")).decode("ascii")[:400]
+
+
+def hash_text(text: str = "", algorithm: str = "sha256") -> str:
+    if not text:
+        return "Give me the text to hash"
+    key = re.sub(r"[^a-z0-9]", "", (algorithm or "sha256").lower())
+    key = key if key in ("md5", "sha1", "sha256", "sha512") else "sha256"
+    digest = hashlib.new(key, text.encode("utf-8")).hexdigest()
+    return f"The {key.upper()} hash begins {digest[:12]} and is {len(digest)} characters long. The full value is {digest}"
+
+
+def uuid_generator(count: str = "1") -> str:
+    n = int(min(3, max(1, _amount(count) or 1)))
+    return "; ".join(str(uuid.uuid4()) for _ in range(n))
+
+
+_X_COLORS = {"black": (0, 0, 0), "white": (255, 255, 255), "red": (255, 0, 0), "green": (0, 128, 0), "lime": (0, 255, 0),
+             "blue": (0, 0, 255), "yellow": (255, 255, 0), "cyan": (0, 255, 255), "magenta": (255, 0, 255),
+             "orange": (255, 165, 0), "purple": (128, 0, 128), "pink": (255, 192, 203), "brown": (165, 42, 42),
+             "gray": (128, 128, 128), "silver": (192, 192, 192), "navy": (0, 0, 128), "teal": (0, 128, 128),
+             "maroon": (128, 0, 0), "olive": (128, 128, 0), "gold": (255, 215, 0), "turquoise": (64, 224, 208),
+             "violet": (238, 130, 238), "indigo": (75, 0, 130), "salmon": (250, 128, 114), "coral": (255, 127, 80),
+             "beige": (245, 245, 220), "crimson": (220, 20, 60), "khaki": (240, 230, 140), "lavender": (230, 230, 250)}
+
+
+def color_converter(color: str = "") -> str:
+    raw = (color or "").strip().lower()
+    key = raw.replace(" ", "").replace("grey", "gray")
+    rgb = _X_COLORS.get(key)
+    if rgb is None:
+        hexm = re.fullmatch(r"#?([0-9a-f]{3}|[0-9a-f]{6})", key)
+        if hexm:
+            h = hexm.group(1)
+            h = "".join(c * 2 for c in h) if len(h) == 3 else h
+            rgb = tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+        else:
+            nums = _floats(raw)
+            if raw.startswith("hsl") and len(nums) >= 3:
+                r, g, b = colorsys.hls_to_rgb((nums[0] % 360) / 360, min(1, nums[2] / 100), min(1, nums[1] / 100))
+                rgb = (round(r * 255), round(g * 255), round(b * 255))
+            elif len(nums) >= 3 and all(0 <= n <= 255 for n in nums[:3]):
+                rgb = tuple(int(n) for n in nums[:3])
+    if rgb is None:
+        return "Give me a color as a name, a hex code like ff8800, or three RGB numbers"
+    h, l, s = colorsys.rgb_to_hls(*(c / 255 for c in rgb))
+    nearest = min(_X_COLORS, key=lambda n: sum((a - b) ** 2 for a, b in zip(_X_COLORS[n], rgb)))
+    return (f"Hex #{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}, RGB {rgb[0]}, {rgb[1]}, {rgb[2]}, "
+            f"HSL {round(h * 360)} degrees, {round(s * 100)} percent, {round(l * 100)} percent. Closest color name: {nearest}")
+
+
+_X_HTTP = {100: "Continue, the server got the request headers", 101: "Switching protocols", 200: "OK, the request worked",
+           201: "Created, a new resource was made", 202: "Accepted, but not finished yet", 204: "No content, it worked and there is nothing to return",
+           206: "Partial content, a piece of the file was sent", 301: "Moved permanently to a new address",
+           302: "Found, a temporary redirect", 303: "See other, look at a different address", 304: "Not modified, use your cached copy",
+           307: "Temporary redirect that keeps the request method", 308: "Permanent redirect that keeps the request method",
+           400: "Bad request, the server could not understand it", 401: "Unauthorized, you need to log in",
+           403: "Forbidden, you are not allowed to see this", 404: "Not found, that page does not exist",
+           405: "Method not allowed", 408: "Request timeout, the client was too slow", 409: "Conflict with the current state",
+           410: "Gone, it was removed for good", 413: "Payload too large", 414: "The address was too long",
+           415: "Unsupported media type", 418: "I am a teapot, an April Fools joke that stuck", 422: "Unprocessable content, the data was invalid",
+           429: "Too many requests, slow down", 431: "Request headers too large", 451: "Unavailable for legal reasons",
+           500: "Internal server error, something broke on the server", 501: "Not implemented", 502: "Bad gateway, a server upstream failed",
+           503: "Service unavailable, the server is overloaded or down", 504: "Gateway timeout, an upstream server was too slow"}
+
+
+def http_status_info(code: str = "") -> str:
+    text = (code or "").strip().lower()
+    number = next((int(n) for n in re.findall(r"\d{3}", text)), None)
+    if number is None and text:
+        number = next((c for c, d in _X_HTTP.items() if text in d.lower()), None)
+    if number is None:
+        return "Give me an HTTP status code like 404"
+    meaning = _X_HTTP.get(number)
+    if meaning:
+        return f"{number}: {meaning}"
+    family = {1: "an informational response", 2: "a success", 3: "a redirect", 4: "a client error", 5: "a server error"}.get(number // 100)
+    return f"{number} is not a common code, but its group means {family}" if family else f"{number} is not an HTTP status code"
+
+
+_X_PORTS = {20: ("FTP data", "file transfer"), 21: ("FTP", "file transfer control"), 22: ("SSH", "secure remote login"),
+            23: ("Telnet", "unencrypted remote login"), 25: ("SMTP", "sending email between servers"), 53: ("DNS", "name lookups"),
+            67: ("DHCP", "handing out network addresses"), 80: ("HTTP", "websites"), 110: ("POP3", "receiving email"),
+            123: ("NTP", "time sync"), 143: ("IMAP", "reading email"), 161: ("SNMP", "network monitoring"),
+            389: ("LDAP", "directory services"), 443: ("HTTPS", "secure websites"), 445: ("SMB", "Windows file sharing"),
+            465: ("SMTPS", "secure email sending"), 587: ("SMTP submission", "sending email from a client"),
+            636: ("LDAPS", "secure directory services"), 993: ("IMAPS", "secure email reading"), 995: ("POP3S", "secure email receiving"),
+            1234: ("LM Studio", "its default local server"), 1433: ("SQL Server", "Microsoft database"), 1883: ("MQTT", "IoT messaging"),
+            3000: ("dev servers", "often Node or React apps"), 3306: ("MySQL", "database"), 3389: ("RDP", "Windows remote desktop"),
+            5000: ("Flask", "a common Python dev server"), 5432: ("PostgreSQL", "database"), 5900: ("VNC", "remote screen sharing"),
+            6379: ("Redis", "in-memory database"), 8080: ("HTTP alternate", "proxies and dev servers"), 8123: ("Home Assistant", "its web interface"),
+            8883: ("MQTT over TLS", "secure IoT messaging"), 9200: ("Elasticsearch", "search engine"), 27017: ("MongoDB", "database")}
+
+
+def port_info(port: str = "") -> str:
+    text = (port or "").strip().lower()
+    number = next((int(n) for n in re.findall(r"\d+", text) if int(n) < 65536), None)
+    if number is not None:
+        name, what = _X_PORTS.get(number, (None, None))
+        if name:
+            return f"Port {number} is {name}, used for {what}"
+        return f"Port {number} is not a well known port" + (", it is in the private range" if number >= 49152 else "")
+    hits = [(p, n, w) for p, (n, w) in _X_PORTS.items() if text and text in n.lower()]
+    if not hits:
+        return "Give me a port number or a service name like SSH"
+    return _join([f"{n} uses port {p}" for p, n, _ in hits[:3]])
+
+
+_X_DOW = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+_X_MONTHS = ["", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+
+
+def _x_cron_part(part: str, names=None) -> str:
+    step = None
+    if "/" in part:
+        part, step = part.split("/", 1)
+
+    def nm(v):
+        return names[int(v)] if names and v.isdigit() and int(v) < len(names) else v
+    if part in ("*", ""):
+        base = ""
+    elif "-" in part:
+        a, b = part.split("-", 1)
+        base = f"{nm(a)} to {nm(b)}"
+    else:
+        base = nm(part)
+    if step:
+        return f"every {step} from {base}" if base else f"every {step}"
+    return base
+
+
+def cron_explain(expression: str = "") -> str:
+    expr = (expression or "").strip().strip("\"'`").lower()
+    aliases = {"@daily": "0 0 * * *", "@midnight": "0 0 * * *", "@hourly": "0 * * * *", "@weekly": "0 0 * * 0",
+               "@monthly": "0 0 1 * *", "@yearly": "0 0 1 1 *", "@annually": "0 0 1 1 *"}
+    expr = aliases.get(expr, expr)
+    expr = re.sub(r"\b(sun|mon|tue|wed|thu|fri|sat)\w*", lambda m: str(["sun", "mon", "tue", "wed", "thu", "fri", "sat"].index(m.group(1))), expr)
+    expr = re.sub(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*",
+                  lambda m: str(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"].index(m.group(1)) + 1), expr)
+    parts = expr.split()
+    if len(parts) != 5:
+        return "A cron expression has five fields: minute, hour, day of month, month and day of week"
+    minute, hour, dom, month, dow = parts
+    num = r"\d+(?:,\d+)*"
+    if re.fullmatch(num, minute) and re.fullmatch(num, hour):
+        times = [f"{int(h):02d}:{int(m):02d}" for h in hour.split(",") for m in minute.split(",")]
+        when = "at " + _join(times[:6])
+    elif minute == "*" and hour == "*":
+        when = "every minute"
+    elif minute.startswith("*/") and hour == "*":
+        when = f"every {minute[2:]} minutes"
+    elif re.fullmatch(num, minute) and hour == "*":
+        when = "at the start of every hour" if minute == "0" else f"at minute {minute} of every hour"
+    else:
+        mtext = "every minute" if minute == "*" else (f"every {minute[2:]} minutes" if minute.startswith("*/") else f"at minute {minute}")
+        when = f"{mtext}, during hour {_x_cron_part(hour)}" if hour != "*" else mtext
+    extra = []
+    if dom != "*":
+        extra.append("on day " + _join([_x_cron_part(p) for p in dom.split(",")]) + " of the month")
+    if month != "*":
+        extra.append("in " + _join([_x_cron_part(p, _X_MONTHS) for p in month.split(",")]))
+    if dow != "*":
+        extra.append("on " + _join([_x_cron_part(p, _X_DOW) for p in dow.split(",")]))
+    return ", ".join([when.capitalize()] + extra) if extra else when.capitalize() + (" every day" if "every" not in when else "")
+
+
+# ---- D. math and science ---------------------------------------------------
+_X_ELEMENTS = ("H Hydrogen,He Helium,Li Lithium,Be Beryllium,B Boron,C Carbon,N Nitrogen,O Oxygen,F Fluorine,Ne Neon,"
+               "Na Sodium,Mg Magnesium,Al Aluminium,Si Silicon,P Phosphorus,S Sulfur,Cl Chlorine,Ar Argon,K Potassium,"
+               "Ca Calcium,Sc Scandium,Ti Titanium,V Vanadium,Cr Chromium,Mn Manganese,Fe Iron,Co Cobalt,Ni Nickel,"
+               "Cu Copper,Zn Zinc,Ga Gallium,Ge Germanium,As Arsenic,Se Selenium,Br Bromine,Kr Krypton,Rb Rubidium,"
+               "Sr Strontium,Y Yttrium,Zr Zirconium,Nb Niobium,Mo Molybdenum,Tc Technetium,Ru Ruthenium,Rh Rhodium,"
+               "Pd Palladium,Ag Silver,Cd Cadmium,In Indium,Sn Tin,Sb Antimony,Te Tellurium,I Iodine,Xe Xenon,"
+               "Cs Caesium,Ba Barium,La Lanthanum,Ce Cerium,Pr Praseodymium,Nd Neodymium,Pm Promethium,Sm Samarium,"
+               "Eu Europium,Gd Gadolinium,Tb Terbium,Dy Dysprosium,Ho Holmium,Er Erbium,Tm Thulium,Yb Ytterbium,"
+               "Lu Lutetium,Hf Hafnium,Ta Tantalum,W Tungsten,Re Rhenium,Os Osmium,Ir Iridium,Pt Platinum,Au Gold,"
+               "Hg Mercury,Tl Thallium,Pb Lead,Bi Bismuth,Po Polonium,At Astatine,Rn Radon,Fr Francium,Ra Radium,"
+               "Ac Actinium,Th Thorium,Pa Protactinium,U Uranium,Np Neptunium,Pu Plutonium,Am Americium,Cm Curium,"
+               "Bk Berkelium,Cf Californium,Es Einsteinium,Fm Fermium,Md Mendelevium,No Nobelium,Lr Lawrencium,"
+               "Rf Rutherfordium,Db Dubnium,Sg Seaborgium,Bh Bohrium,Hs Hassium,Mt Meitnerium,Ds Darmstadtium,"
+               "Rg Roentgenium,Cn Copernicium,Nh Nihonium,Fl Flerovium,Mc Moscovium,Lv Livermorium,Ts Tennessine,"
+               "Og Oganesson").split(",")
+_X_MASSES = ("1.008 4.0026 6.94 9.0122 10.81 12.011 14.007 15.999 18.998 20.180 22.990 24.305 26.982 28.085 30.974 32.06 "
+             "35.45 39.948 39.098 40.078 44.956 47.867 50.942 51.996 54.938 55.845 58.933 58.693 63.546 65.38 69.723 "
+             "72.630 74.922 78.971 79.904 83.798 85.468 87.62 88.906 91.224 92.906 95.95 98 101.07 102.91 106.42 "
+             "107.87 112.41 114.82 118.71 121.76 127.60 126.90 131.29 132.91 137.33 138.91 140.12 140.91 144.24 145 "
+             "150.36 151.96 157.25 158.93 162.50 164.93 167.26 168.93 173.05 174.97 178.49 180.95 183.84 186.21 "
+             "190.23 192.22 195.08 196.97 200.59 204.38 207.2 208.98 209 210 222 223 226 227 232.04 231.04 238.03 "
+             "237 244 243 247 247 251 252 257 258 259 266 267 268 269 270 277 278 281 282 285 286 289 290 293 294 294").split()
+_X_ALIASES = {"aluminum": "aluminium", "cesium": "caesium", "sulphur": "sulfur"}
+
+
+def periodic_element(element: str = "") -> str:
+    key = (element or "").strip().lower()
+    key = _X_ALIASES.get(key, key)
+    number = None
+    if key.isdigit() and 1 <= int(key) <= 118:
+        number = int(key)
+    else:
+        for i, entry in enumerate(_X_ELEMENTS, start=1):
+            sym, name = entry.split(" ", 1)
+            if key in (sym.lower(), name.lower()):
+                number = i
+                break
+    if number is None:
+        return "Give me an element name, a symbol like Fe, or an atomic number"
+    sym, name = _X_ELEMENTS[number - 1].split(" ", 1)
+    mass = _X_MASSES[number - 1]
+    unstable = number in (43, 61) or 84 <= number <= 89 or number >= 93
+    if number in (2, 10, 18, 36, 54, 86, 118):
+        kind = "a noble gas"
+    elif number in (3, 11, 19, 37, 55, 87):
+        kind = "an alkali metal"
+    elif number in (4, 12, 20, 38, 56, 88):
+        kind = "an alkaline earth metal"
+    elif number in (9, 17, 35, 53, 85, 117):
+        kind = "a halogen"
+    elif number in (5, 14, 32, 33, 51, 52):
+        kind = "a metalloid"
+    elif 57 <= number <= 71:
+        kind = "a lanthanide"
+    elif 89 <= number <= 103:
+        kind = "an actinide"
+    elif number in (1, 6, 7, 8, 15, 16, 34):
+        kind = "a nonmetal"
+    elif number in (13, 31, 49, 50, 81, 82, 83, 84, 113, 114, 115, 116):
+        kind = "a post-transition metal"
+    else:
+        kind = "a transition metal"
+    period = 1 if number <= 2 else 2 if number <= 10 else 3 if number <= 18 else 4 if number <= 36 else 5 if number <= 54 else 6 if number <= 86 else 7
+    mass_text = f"its most stable isotope has mass number {mass}" if unstable else f"atomic mass {mass}"
+    return f"{name}, symbol {sym}, atomic number {number}, {mass_text}. It is {kind} in period {period}"
+
+
+_X_PLANETS = {  # distance from the Sun in million km, diameter km, gravity m/s2, day, year, moons
+    "mercury": (57.9, 4879, 3.70, "59 Earth days to rotate once", "88 Earth days", "no moons"),
+    "venus": (108.2, 12104, 8.87, "243 Earth days to rotate once, backwards", "225 Earth days", "no moons"),
+    "earth": (149.6, 12742, 9.81, "24 hours", "365 days", "one moon"),
+    "mars": (227.9, 6779, 3.71, "24.6 hours", "687 Earth days", "two moons"),
+    "jupiter": (778.5, 139820, 24.79, "9.9 hours", "11.9 Earth years", "more than 90 moons"),
+    "saturn": (1432, 116460, 10.44, "10.7 hours", "29.4 Earth years", "well over 100 moons"),
+    "uranus": (2867, 50724, 8.87, "17.2 hours", "84 Earth years", "about 28 moons"),
+    "neptune": (4515, 49244, 11.15, "16.1 hours", "165 Earth years", "about 16 moons"),
+    "pluto": (5906, 2377, 0.62, "6.4 Earth days", "248 Earth years", "five moons"),
+}
+
+
+def planet_info(planet: str = "", weight: str = "") -> str:
+    key = next((p for p in _X_PLANETS if p in (planet or "").lower()), None)
+    if not key:
+        return "Tell me a planet, from Mercury to Neptune, or Pluto"
+    dist, diam, g, day, year, moons = _X_PLANETS[key]
+    text = (f"{key.title()} is {_num(dist)} million kilometers from the Sun and {_num(diam)} kilometers wide. "
+            f"A day takes {day}, a year takes {year}, and it has {moons}. Gravity is {g / 9.81:.2f} times Earth's")
+    kg = _weight_kg(weight) if (weight or "").strip() else None
+    if kg:
+        there = kg * g / 9.81
+        if re.search(r"\b(lb|lbs|pound|pounds)\b", weight.lower()):
+            text += f". You would weigh {_num(round(there * 2.20462, 1))} pounds there"
+        else:
+            text += f". You would weigh {_num(round(there, 1))} kilograms there"
+    return text
+
+
+def triangle_solver(known: str = "") -> str:
+    low = (known or "").lower()
+    nums = _floats(low)
+    if any(n <= 0 for n in nums):
+        return "Triangle sides must be positive numbers"
+    if len(nums) == 3:
+        a, b, c = sorted(nums)
+        if a + b <= c:
+            return "Those three sides cannot make a triangle"
+        s = (a + b + c) / 2
+        area = math.sqrt(s * (s - a) * (s - b) * (s - c))
+        angles = [math.degrees(math.acos(max(-1, min(1, v)))) for v in
+                  ((b * b + c * c - a * a) / (2 * b * c), (a * a + c * c - b * b) / (2 * a * c), (a * a + b * b - c * c) / (2 * a * b))]
+        kind = "equilateral" if a == c else "isosceles" if a == b or b == c else "scalene"
+        if abs(a * a + b * b - c * c) < 1e-9 * c * c:
+            kind += " and right-angled"
+        return (f"It is a {kind} triangle with area {_num(round(area, 2))}, perimeter {_num(round(a + b + c, 2))} "
+                f"and angles {', '.join(_num(round(x, 1)) for x in angles)} degrees")
+    if len(nums) == 2:
+        hyp = re.search(r"hypotenuse\D{0,12}(\d+(?:[.,]\d+)?)", low)
+        if hyp:
+            h = _first_float(hyp.group(1))
+            leg = next((n for n in nums if n != h), nums[1] if nums[0] == h else nums[0])
+            if leg >= h:
+                return "The hypotenuse must be the longest side"
+            other = math.sqrt(h * h - leg * leg)
+            return (f"The other leg is {_num(round(other, 3))}, the area is {_num(round(leg * other / 2, 3))}, "
+                    f"and the angles are {_num(round(math.degrees(math.atan2(leg, other)), 1))} and "
+                    f"{_num(round(math.degrees(math.atan2(other, leg)), 1))} degrees")
+        a, b = nums
+        h = math.hypot(a, b)
+        return (f"The hypotenuse is {_num(round(h, 3))} and the area is {_num(round(a * b / 2, 3))}. "
+                f"The angles are {_num(round(math.degrees(math.atan2(a, b)), 1))} and {_num(round(math.degrees(math.atan2(b, a)), 1))} degrees")
+    return "Give me two legs, a leg and the hypotenuse, or all three sides"
+
+
+def combinatorics(n: str = "", r: str = "", kind: str = "combinations") -> str:
+    nn, rr = _amount(n), _amount(r)
+    if nn is None or nn < 0 or nn != int(nn) or nn > 1000:
+        return "Give me a whole number n, up to 1000"
+    nn = int(nn)
+    low = (kind or "").lower()
+    if "fact" in low or (rr is None and "perm" not in low and "comb" not in low and "choose" not in low):
+        return f"{nn} factorial is {_num(math.factorial(nn))}"
+    if rr is None or rr < 0 or rr != int(rr) or rr > nn:
+        return "Give me a whole number r that is not larger than n"
+    rr = int(rr)
+    if "perm" in low:
+        return f"There are {_num(math.perm(nn, rr))} ordered ways to pick {rr} from {nn}"
+    return f"There are {_num(math.comb(nn, rr))} ways to choose {rr} from {nn}"
+
+
+def sequence_calc(sequence: str = "fibonacci", first: str = "", step: str = "", n: str = "10") -> str:
+    low = (sequence or "").lower()
+    count = _amount(n)
+    if count is None or count < 1 or count != int(count) or count > 5000:
+        return "Tell me which term you want, from 1 to 5000"
+    count = int(count)
+    if "fib" in low:
+        a, b, terms = 1, 1, []
+        for i in range(count):
+            terms.append(a)
+            a, b = b, a + b
+        ordinal = f"{count}th" if count not in (1, 2, 3) else {1: "first", 2: "second", 3: "third"}[count]
+        text = f"The {ordinal} Fibonacci number is {_num(terms[-1])}"
+        shown = terms[:10] if count <= 10 else terms[:8]
+        return text + f". The sequence starts {', '.join(_num(t) for t in shown)}"
+    a1, d = _amount(first), _amount(step)
+    if a1 is None or d is None:
+        return "Give me the first term and the step, or the ratio for a geometric sequence"
+    try:
+        if "geo" in low:
+            term = a1 * d ** (count - 1)
+            total = a1 * count if d == 1 else a1 * (d ** count - 1) / (d - 1)
+            kind = "geometric"
+        else:
+            term = a1 + (count - 1) * d
+            total = count * (2 * a1 + (count - 1) * d) / 2
+            kind = "arithmetic"
+    except OverflowError:
+        return "That number is too large to calculate"
+    return f"In this {kind} sequence, term {count} is {_num(term)} and the sum of the first {count} terms is {_num(total)}"
+
+
+_X_LY = 9.4607304725808e12
+_X_SPACE_KM = {"moon": 384400, "sun": 149597870.7, "mars": 225e6, "jupiter": 778e6, "saturn": 1.43e9, "uranus": 2.87e9,
+               "neptune": 4.5e9, "pluto": 5.9e9, "voyager": 25.3e9, "proxima": 4.2465 * _X_LY, "alpha centauri": 4.37 * _X_LY,
+               "andromeda": 2.537e6 * _X_LY, "space station": 420, "iss": 420, "geostationary": 35786}
+
+
+def light_travel_time(destination: str = "", speed: str = "") -> str:
+    low = (destination or "").lower()
+    key = next((k for k in _X_SPACE_KM if k in low), None)
+    if key:
+        km = float(_X_SPACE_KM[key])
+    else:
+        value = _amount(low)
+        if value is None:
+            return "Tell me a place like the Moon, Mars or Proxima Centauri, or a distance"
+        km = value * (1e6 if "million" in low else _X_LY if re.search(r"light.?year|\bly\b", low) else 1.609344 if re.search(r"\bmiles?\b", low) else 1)
+    text = f"Light needs {_x_duration(km / 299792.458)} to travel {_num(round(km, 1))} kilometers"
+    spd = speed or ""
+    v = _amount(spd)
+    kmh = 100.0 if v is None else v * (1.609344 if re.search(r"mph|mile", spd.lower()) else 3600 if re.search(r"km/s|per second", spd.lower()) else 3.6 if re.search(r"m/s", spd.lower()) else 1)
+    who = "by car at 100 kilometers an hour" if v is None else f"at {_num(round(kmh))} kilometers an hour"
+    return text + f". Going {who} would take {_x_duration(km / kmh * 3600)}"
+
+
+# ---- E. money --------------------------------------------------------------
+def rule_of_72(rate: str = "", years: str = "") -> str:
+    r, y = _amount(rate), _amount(years)
+    if r and r > 0:
+        exact = math.log(2) / math.log(1 + r / 100)
+        return f"At {_num(r)} percent a year, money doubles in about {_num(round(72 / r, 1))} years by the rule of 72, or {_num(round(exact, 1))} years exactly"
+    if y and y > 0:
+        return f"To double in {_num(y)} years you need about {_num(round(72 / y, 1))} percent a year, or {_num(round((2 ** (1 / y) - 1) * 100, 2))} percent exactly"
+    return "Tell me an interest rate, or in how many years you want to double your money"
+
+
+def profit_margin(cost: str = "", price: str = "", margin: str = "") -> str:
+    c, p, m = _amount(cost), _amount(price), _amount(margin)
+    if c is not None and c > 0 and m is not None and 0 <= m < 100 and p is None:
+        sell = c / (1 - m / 100)
+        return f"To get a {_num(m)} percent margin on a cost of {_num(c)}, sell for {_num(round(sell, 2))}. That is a {_num(round((sell / c - 1) * 100, 1))} percent markup"
+    if c is None or p is None or c < 0 or p <= 0:
+        return "Give me the cost and the selling price"
+    profit = p - c
+    markup = f"{_num(round(profit / c * 100, 1))} percent" if c > 0 else "not defined"
+    return f"The profit is {_num(round(profit, 2))}, the margin is {_num(round(profit / p * 100, 1))} percent and the markup is {markup}"
+
+
+def _x_loan_run(principal: float, rate: float, payment: float, extra: float):
+    balance, months, interest = principal, 0, 0.0
+    while balance > 0.005 and months < 1200:
+        charge = balance * rate
+        pay = min(balance + charge, payment + extra)
+        if pay <= charge and extra == 0:
+            return None
+        balance += charge - pay
+        interest += charge
+        months += 1
+    return months, interest
+
+
+def loan_payoff(principal: str = "", rate: str = "", years: str = "", extra: str = "") -> str:
+    p, apr, y, e = _amount(principal), _amount(rate), _amount(years), _amount(extra) or 0.0
+    if not p or p <= 0 or apr is None or apr < 0 or not y or y <= 0:
+        return "Give me the loan amount, the yearly rate and the number of years"
+    r, n = apr / 1200, int(round(y * 12))
+    payment = p / n if r == 0 else p * r / (1 - (1 + r) ** -n)
+    base = _x_loan_run(p, r, payment, 0.0)
+    text = f"The payment is {_spent(payment)} a month and the total interest is {_spent(base[1])}"
+    if e > 0:
+        fast = _x_loan_run(p, r, payment, e)
+        saved = base[0] - fast[0]
+        yrs, mos = divmod(fast[0], 12)
+        length = _join([x for x in (f"{yrs} years" if yrs else "", f"{mos} months" if mos else "") if x])
+        text += (f". Paying {_spent(e)} extra a month finishes it in {length}, {saved} months sooner, "
+                 f"and saves {_spent(base[1] - fast[1])} in interest")
+    return text
+
+
+# ---- F. health and home ----------------------------------------------------
+def _x_cm(text: str):
+    low = (text or "").lower()
+    if re.search(r"\b(ft|feet|foot)\b|'", low):
+        m = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:ft|feet|foot|')\s*(?:(\d+(?:[.,]\d+)?))?", low)
+        if m:
+            inches = float(m.group(1).replace(",", ".")) * 12 + (float(m.group(2).replace(",", ".")) if m.group(2) else 0)
+            return inches * 2.54
+    v = _amount(low)
+    if v is None:
+        return None
+    if re.search(r"\b(in|inch|inches)\b|\"", low):
+        return v * 2.54
+    if re.search(r"\bm\b|meter|metre", low) and v < 3:
+        return v * 100
+    return v
+
+
+def body_fat(gender: str = "", height: str = "", waist: str = "", neck: str = "", hip: str = "") -> str:
+    low = (gender or "").lower()
+    female = bool(re.search(r"\b(f|female|woman|women|girl)\b", low))
+    male = bool(re.search(r"\b(m|male|man|men|boy)\b", low))
+    if not (female or male):
+        return "Tell me if the measurements are for a man or a woman"
+    h, w, nk, hp = _x_cm(height), _x_cm(waist), _x_cm(neck), _x_cm(hip)
+    if not (h and w and nk) or (female and not hp):
+        return "I need height, waist and neck" + (", and hip for women" if female else "") + ", in centimeters or inches"
+    try:
+        if female:
+            bf = 495 / (1.29579 - 0.35004 * math.log10(w + hp - nk) + 0.22100 * math.log10(h)) - 450
+            bands = [(13, "essential fat"), (20, "athletic"), (24, "fit"), (31, "average")]
+        else:
+            bf = 495 / (1.0324 - 0.19077 * math.log10(w - nk) + 0.15456 * math.log10(h)) - 450
+            bands = [(5, "essential fat"), (13, "athletic"), (17, "fit"), (24, "average")]
+    except (ValueError, ZeroDivisionError):
+        return "Those measurements do not look right, check waist and neck"
+    if not 2 <= bf <= 60:
+        return "Those measurements do not look right, check them again"
+    label = next((name for limit, name in bands if bf < limit + 0.5), "above average")
+    return f"Your body fat is roughly {_num(round(bf))} percent, in the {label} range. This is a rough tape measure estimate, not a medical result"
+
+
+_X_MACROS = {"balanced": (45, 25, 30), "fat loss": (40, 35, 25), "muscle": (45, 30, 25), "low carb": (20, 35, 45), "keto": (5, 20, 75)}
+
+
+def macro_split(calories: str = "", goal: str = "balanced") -> str:
+    kcal = _amount(calories)
+    if not kcal or not 800 <= kcal <= 6000:
+        return "Tell me your daily calories, for example 2200"
+    low = (goal or "").lower()
+    key = "keto" if "keto" in low else "low carb" if "low" in low and "carb" in low else "muscle" if re.search(r"muscle|bulk|gain", low) else "fat loss" if re.search(r"loss|lose|cut|fat", low) else "balanced"
+    carb, prot, fat = _X_MACROS[key]
+    return (f"For {_num(kcal)} calories on a {key} split: {_num(round(kcal * carb / 100 / 4))} grams of carbs, "
+            f"{_num(round(kcal * prot / 100 / 4))} grams of protein and {_num(round(kcal * fat / 100 / 9))} grams of fat. "
+            f"That is {carb}, {prot} and {fat} percent of calories")
+
+
+_X_BREATH = {
+    "box": "Box breathing. Breathe in for four seconds, hold for four, breathe out for four, hold for four. Repeat it four times",
+    "478": "Four seven eight breathing. Breathe in through your nose for four seconds, hold for seven, breathe out slowly through your mouth for eight. Repeat it four times",
+    "calm": "Calm breathing. Breathe in through your nose for four seconds, then breathe out slowly for six. Repeat it for a minute",
+    "belly": "Belly breathing. Put a hand on your stomach, breathe in slowly so the hand rises, and breathe out slowly. Repeat it ten times",
+}
+
+
+def breathing_exercise(style: str = "box") -> str:
+    low = re.sub(r"[^a-z0-9]", "", (style or "box").lower())
+    key = "478" if "478" in low else "calm" if "calm" in low or "relax" in low else "belly" if "belly" in low or "diaphragm" in low else "box"
+    return _X_BREATH[key]
+
+
+_X_COFFEE = {"espresso": (2, "espresso"), "pour": (16, "pour over"), "french": (15, "French press"), "press": (15, "French press"),
+             "aero": (15, "AeroPress"), "moka": (10, "moka pot"), "cold": (8, "cold brew concentrate"), "drip": (16, "drip")}
+
+
+def coffee_ratio(method: str = "pour over", amount: str = "") -> str:
+    low = (method or "").lower()
+    ratio, label = next((v for k, v in _X_COFFEE.items() if k in low), (16, "pour over"))
+    text, v = (amount or "").lower(), _amount(amount)
+    if v is not None and v > 0 and re.search(r"\bg\b|gram", text):
+        coffee = v
+        water = coffee * ratio
+    else:
+        water = 250.0 if v is None or v <= 0 else v * (250 if "cup" in text else 1000 if re.search(r"\bl\b|liter|litre", text) else 1)
+        coffee = water / ratio
+    return f"For {label} at one to {ratio}, use {_num(round(coffee, 1))} grams of coffee for {_num(round(water))} milliliters of water"
+
+
+_X_GAS = [(0.25, 110, 225), (0.5, 120, 250), (1, 140, 275), (2, 150, 300), (3, 170, 325), (4, 180, 350), (5, 190, 375),
+          (6, 200, 400), (7, 220, 425), (8, 230, 450), (9, 240, 475)]
+
+
+def oven_temperature(temperature: str = "") -> str:
+    low = (temperature or "").lower()
+    if "gas" in low:
+        mark = 0.5 if re.search(r"1/2|half", low) else 0.25 if re.search(r"1/4|quarter", low) else _amount(re.sub(r"gas|mark", "", low))
+        entry = next((e for e in _X_GAS if mark is not None and abs(e[0] - mark) < 0.01), None)
+        if not entry:
+            return "Gas mark goes from one quarter to 9"
+    else:
+        v = _amount(low)
+        if v is None:
+            return "Give me an oven temperature like 180 C, 350 F or gas mark 4"
+        fahrenheit = bool(re.search(r"\bf\b|fahrenheit|°f", low)) or (v >= 260 and not re.search(r"\bc\b|celsius|°c", low))
+        c = (v - 32) * 5 / 9 if fahrenheit else v
+        entry = min(_X_GAS, key=lambda e: abs(e[1] - c))
+        if abs(entry[1] - c) > 25:
+            return f"That is {_num(round(c))} degrees Celsius, outside the usual gas mark range"
+        return f"{_num(round(c))} degrees Celsius is {_num(round(c * 9 / 5 + 32))} Fahrenheit, about gas mark {_num(entry[0])}, or {_num(round(c - 20))} Celsius in a fan oven"
+    return f"Gas mark {_num(entry[0])} is {entry[1]} degrees Celsius or {entry[2]} Fahrenheit, about {entry[1] - 20} Celsius in a fan oven"
+
+
+# ---- G. internet and fun (free public APIs) --------------------------------
+def hacker_news(count: str = "3") -> str:
+    n = int(min(5, max(1, _amount(count) or 3)))
+    ids = _get("https://hacker-news.firebaseio.com/v0/topstories.json")
+    if not isinstance(ids, list):
+        return "I could not reach Hacker News"
+    titles = []
+    for item_id in ids[:n]:
+        item = _get(f"https://hacker-news.firebaseio.com/v0/item/{item_id}.json")
+        if isinstance(item, dict) and item.get("title"):
+            titles.append(f"{len(titles) + 1}) {item['title']}")
+    return "Top on Hacker News: " + ", ".join(titles) if titles else "I could not read the stories"
+
+
+def xkcd(which: str = "latest") -> str:
+    low = (which or "latest").strip().lower()
+    latest = _get("https://xkcd.com/info.0.json")
+    if not isinstance(latest, dict):
+        return "I could not reach xkcd"
+    comic = latest
+    wanted = None
+    if low.isdigit():
+        wanted = int(low)
+    elif "random" in low and latest.get("num"):
+        wanted = random.randint(1, int(latest["num"]))
+    if wanted and wanted != 404 and wanted != latest.get("num"):
+        comic = _get(f"https://xkcd.com/{wanted}/info.0.json") or {}
+    if not comic.get("title"):
+        return "I could not find that comic"
+    return f"xkcd number {comic.get('num')}, {comic['title']}. The caption says: {str(comic.get('alt', ''))[:300]}"
+
+
+def people_in_space() -> str:
+    data = _get("http://api.open-notify.org/astros.json")
+    people = (data or {}).get("people") if isinstance(data, dict) else None
+    if not people:
+        return "I could not find out who is in space"
+    crafts = {}
+    for p in people:
+        crafts.setdefault(p.get("craft", "space"), []).append(p.get("name", ""))
+    parts = [f"{len(v)} on {k}: {_join(v)}" for k, v in crafts.items()]
+    return f"There are {len(people)} people in space right now. " + "; ".join(parts)
+
+
+def _x_public_host(host: str) -> bool:
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return False
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified:
+            return False
+    return bool(infos)
+
+
+def read_rss(url: str = "", count: str = "3") -> str:
+    url = (url or "").strip()
+    if url and "://" not in url:
+        url = "https://" + url
+    n = int(min(5, max(1, _amount(count) or 3)))
+    response = None
+    for _ in range(4):
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname or not _x_public_host(parsed.hostname):
+            return "I can only read public feeds from the internet"
+        try:
+            response = _req("GET", url, headers=UA, timeout=10, allow_redirects=False)
+        except requests.RequestException:
+            return "I could not reach that feed"
+        if response.status_code in (301, 302, 303, 307, 308) and response.headers.get("Location"):
+            url = urljoin(url, response.headers["Location"])
+            continue
+        break
+    if response is None or response.status_code != 200:
+        return "I could not read that feed"
+    try:
+        root = ElementTree.fromstring(response.content[:2_000_000])
+    except ElementTree.ParseError:
+        return "That does not look like an RSS feed"
+    atom = "{http://www.w3.org/2005/Atom}"
+    entries = root.findall(".//item") or root.findall(f".//{atom}entry")
+    titles = []
+    for e in entries[:n]:
+        t = e.find("title") if e.find("title") is not None else e.find(f"{atom}title")
+        if t is not None and (t.text or "").strip():
+            titles.append(f"{len(titles) + 1}) {t.text.strip()[:140]}")
+    head = root.find(".//channel/title") if root.find(".//channel/title") is not None else root.find(f"{atom}title")
+    source = (head.text or "").strip() if head is not None and head.text else urlparse(url).hostname
+    return f"From {source}: " + ", ".join(titles) if titles else "That feed has no entries"
+
+
+def tv_next_episode(show: str = "") -> str:
+    show = (show or "").strip()
+    if not show:
+        return "Tell me which TV show"
+    data = _get("https://api.tvmaze.com/singlesearch/shows", {"q": show, "embed[]": ["nextepisode", "previousepisode"]})
+    if not isinstance(data, dict) or not data.get("name"):
+        return f"I could not find a show called {show}"
+    emb = data.get("_embedded") or {}
+    nxt, prev = emb.get("nextepisode"), emb.get("previousepisode")
+    name = data["name"]
+    if nxt and nxt.get("airdate"):
+        try:
+            when = _x_when_days(date.fromisoformat(nxt["airdate"]))
+        except ValueError:
+            when = f"on {nxt['airdate']}"
+        return f"The next {name} episode, season {nxt.get('season')} episode {nxt.get('number')}, {nxt.get('name', '')}, airs {when}"
+    status = (data.get("status") or "").lower()
+    ended = " It has ended" if status == "ended" else " No new episode is announced yet"
+    last = f". The last one aired on {prev['airdate']}" if prev and prev.get("airdate") else ""
+    return f"{name}:{ended}{last}"
+
+
+def game_deals(game: str = "", count: str = "3") -> str:
+    n = int(min(5, max(1, _amount(count) or 3)))
+    params = {"onSale": 1, "pageSize": n, "sortBy": "Price" if (game or "").strip() else "Deal Rating"}
+    if (game or "").strip():
+        params["title"] = game.strip()
+    deals = _get("https://www.cheapshark.com/api/1.0/deals", params)
+    if not isinstance(deals, list) or not deals:
+        return f"I found no deals for {game.strip()}" if (game or "").strip() else "I could not load game deals"
+    lines = []
+    for d in deals[:n]:
+        try:
+            lines.append(f"{d['title']} for {d['salePrice']} dollars, down from {d['normalPrice']}, {round(float(d['savings']))} percent off")
+        except (KeyError, ValueError, TypeError):
+            continue
+    return "Game deals: " + "; ".join(lines) if lines else "I could not read the deals"
+
+
+def dnd_spell(spell: str = "") -> str:
+    name = (spell or "").strip().lower()
+    if not name:
+        return "Tell me which spell"
+    index = re.sub(r"[^a-z0-9]+", "-", name).strip("-")
+    data = _get(f"https://www.dnd5eapi.co/api/spells/{index}")
+    if not isinstance(data, dict) or not data.get("name"):
+        found = _get("https://www.dnd5eapi.co/api/spells", {"name": name})
+        results = (found or {}).get("results") if isinstance(found, dict) else None
+        if not results:
+            return f"I could not find a spell called {spell.strip()}"
+        data = _get(f"https://www.dnd5eapi.co/api/spells/{results[0]['index']}")
+        if not isinstance(data, dict) or not data.get("name"):
+            return "I could not load that spell"
+    level = "a cantrip" if data.get("level") == 0 else f"a level {data.get('level')} spell"
+    desc = " ".join((data.get("desc") or [""])[:1])
+    if len(desc) > 260:
+        desc = desc[:260].rsplit(" ", 1)[0] + "..."
+    school = (data.get("school") or {}).get("name", "")
+    return (f"{data['name']} is {level} of {school}. Casting time {data.get('casting_time', '?')}, range {data.get('range', '?')}, "
+            f"duration {data.get('duration', '?')}. {desc}")
+
+
+_X_COUNTRY_CODES = {"czech republic": "cz", "czechia": "cz", "germany": "de", "united states": "us", "usa": "us", "america": "us",
+                    "united kingdom": "gb", "uk": "gb", "france": "fr", "spain": "es", "italy": "it", "poland": "pl",
+                    "austria": "at", "slovakia": "sk", "netherlands": "nl", "canada": "ca", "australia": "au", "switzerland": "ch"}
+
+
+def postal_code(code: str = "", country: str = "") -> str:
+    zipcode = re.sub(r"\s+", "", (code or "").strip())
+    if not zipcode:
+        return "Tell me the postal code"
+    raw = (country or "").strip().lower()
+    cc = _X_COUNTRY_CODES.get(raw) or (raw if re.fullmatch(r"[a-z]{2}", raw) else "") or _default_country().lower()
+    data = _get(f"https://api.zippopotam.us/{cc}/{quote(zipcode)}")
+    places = (data or {}).get("places") if isinstance(data, dict) else None
+    if not places:
+        return f"I found no place for postal code {zipcode} in {cc.upper()}"
+    place = places[0]
+    where = place.get("place name", "")
+    state = place.get("state", "")
+    return f"{zipcode} in {cc.upper()} is {where}" + (f", {state}" if state and state != where else "")
+
+
+def mac_vendor(mac: str = "") -> str:
+    digits = re.sub(r"[^0-9a-fA-F]", "", mac or "")
+    if len(digits) < 6:
+        return "Give me a MAC address like 3C:5A:B4:12:34:56"
+    oui = ":".join(digits[i:i + 2] for i in (0, 2, 4))
+    try:
+        response = _req("GET", f"https://api.macvendors.com/{oui}", headers=UA, timeout=10)
+    except requests.RequestException:
+        return "I could not reach the MAC address lookup"
+    if response.status_code == 200 and response.text.strip():
+        return f"That network card was made by {response.text.strip()[:100]}"
+    if response.status_code == 429:
+        return "Too many lookups, try again in a moment"
+    return "I could not find the maker of that address"
+
+
+# ---- specs: how each tool is described to the model ------------------------
+_MORE_SPECS5 = [
+    _tool("remember_fact", "Remember any fact the user tells you so it can be recalled later. Use for 'remember that my passport is in the blue drawer', "
+          "'remember I parked on level 3'.", {"fact": _text("The fact, as a short sentence, e.g. 'my passport is in the blue drawer'.")}, ["fact"]),
+    _tool("recall_fact", "Recall something the user asked you to remember. Use for 'where is my passport', 'where did I park', 'what did I tell you about ...'.",
+          {"query": _text("Keywords of what to find, e.g. 'passport'.")}, ["query"]),
+    _tool("save_contact", "Save a person's phone number or email. Use for 'save Anna's number 123 456 789'.",
+          {"name": _text("The person's name, e.g. 'Anna'."), "phone": _text("Phone number, e.g. '123 456 789'. Optional."),
+           "email": _text("Email address. Optional.")}, ["name"]),
+    _tool("get_contact", "Look up a saved contact. Use for 'what is Anna's number', 'what is Tom's email'.",
+          {"name": _text("The person's name, e.g. 'Anna'.")}, ["name"]),
+    _tool("log_mood", "Write down today's mood from 1 (awful) to 10 (great). Use for 'my mood is 7', 'I feel like a 4 today'.",
+          {"mood": _text("A number from 1 to 10, e.g. '7'."), "note": _text("Optional short reason, e.g. 'stressful work day'.")}, ["mood"]),
+    _tool("mood_trend", "How the logged mood went over the last week, month or year. Use for 'how has my mood been', 'mood this month'.",
+          {"period": _text("'week', 'month' or 'year'. Default 'week'.")}),
+    _tool("log_debt", "Track money lent or borrowed, or settle it. Use for 'Anna owes me 20', 'I owe Tom 15', 'Anna paid me back'.",
+          {"who": _text("The other person, e.g. 'Anna'."), "amount": _text("Amount, e.g. '20'. Leave empty to settle everything."),
+           "direction": _text("'owes me' (default), 'I owe', or 'paid back' to settle.")}, ["who"]),
+    _tool("debts_summary", "Say who owes the user money and whom the user owes. Use for 'who owes me money', 'what do I owe Tom'.",
+          {"who": _text("Optional person, e.g. 'Tom'. Leave empty for everybody.")}),
+    _tool("add_subscription", "Save a recurring subscription with its price, or cancel one. Use for 'Netflix costs 13 a month', 'my gym is 300 a month', 'remove Netflix'.",
+          {"name": _text("Service name, e.g. 'Netflix'."), "price": _text("Price, e.g. '13'. Use 'cancel' to remove it."),
+           "cycle": _text("'monthly' (default), 'weekly', 'quarterly' or 'yearly'.")}, ["name", "price"]),
+    _tool("subscriptions_total", "Total cost of all saved subscriptions per month and per year. Use for 'how much do I pay for subscriptions'."),
+    _tool("set_budget", "Set a monthly spending budget, overall or for one category. Use for 'set my food budget to 400', 'my monthly budget is 2000'.",
+          {"category": _text("Category like 'food'. Leave empty for the overall budget."), "amount": _text("Monthly amount, e.g. '400'.")}, ["amount"]),
+    _tool("budget_status", "How much of the monthly budget is spent and left, based on logged expenses. Use for 'how is my budget', 'how much food budget is left'.",
+          {"category": _text("Optional category like 'food'. Leave empty for all budgets.")}),
+    _tool("media_control", "Control music or video playing on the PC. Use for 'pause the music', 'next song', 'previous track', 'mute the PC'.",
+          {"action": _text("One of 'play', 'pause', 'next', 'previous', 'stop' or 'mute'.")}, ["action"]),
+    _tool("open_website", "Open a website in the browser on the PC. Use for 'open YouTube', 'open my email', 'open GitHub'.",
+          {"site": _text("A site name like 'youtube' or 'gmail'.")}, ["site"]),
+    _tool("local_ip", "The local network address of the PC. Use for 'what is my local IP', 'what is the address of this computer'."),
+    _tool("top_processes", "Which programs use the most memory or CPU on the PC. Use for 'what is slowing down my computer', 'what uses the most memory'.",
+          {"by": _text("'memory' (default) or 'cpu'."), "count": _text("How many to name, 1 to 5. Default 3.")}),
+    _tool("find_file", "Find a file on the PC by part of its name. Use for 'find my CV', 'where is the file invoice'.",
+          {"name": _text("Part of the file name, e.g. 'invoice'."), "folder": _text("Optional folder in the home directory, e.g. 'documents'.")}, ["name"]),
+    _tool("word_count", "Count words, characters and sentences of a text and the reading time. Use for 'how many words is this'.",
+          {"text": _text("The text to count.")}, ["text"]),
+    _tool("change_case", "Change the letter case of text. Use for 'make this uppercase', 'convert hello world to snake case', 'camel case my variable name'.",
+          {"text": _text("The text, e.g. 'hello world'."), "style": _text("'upper', 'lower', 'title', 'sentence', 'snake', 'kebab', 'camel', 'pascal' or 'constant'.")}, ["text", "style"]),
+    _tool("caesar_cipher", "Encode or decode a Caesar or ROT13 cipher. Use for 'rot13 hello', 'decode this with a shift of 5'.",
+          {"text": _text("The text."), "shift": _text("Shift amount, e.g. '3', or 'rot13'. Default 13."), "mode": _text("'encode' (default) or 'decode'.")}, ["text"]),
+    _tool("base64_tool", "Encode text to Base64 or decode Base64 back to text. Use for 'base64 encode hello', 'decode this base64'.",
+          {"text": _text("The text or Base64 string."), "mode": _text("'encode' (default) or 'decode'.")}, ["text"]),
+    _tool("hash_text", "Compute the MD5, SHA-1, SHA-256 or SHA-512 hash of a text. Use for 'sha256 of hello'.",
+          {"text": _text("The text to hash."), "algorithm": _text("'md5', 'sha1', 'sha256' (default) or 'sha512'.")}, ["text"]),
+    _tool("uuid_generator", "Generate random UUIDs. Use for 'give me a UUID', 'generate a unique id'.", {"count": _text("How many, 1 to 3. Default 1.")}),
+    _tool("color_converter", "Convert a color between name, hex, RGB and HSL and name the closest color. Use for 'what is ff8800 in RGB', 'hex for orange'.",
+          {"color": _text("A color: name 'orange', hex 'ff8800', RGB '255 136 0' or 'hsl 32 100 50'.")}, ["color"]),
+    _tool("http_status_info", "Explain an HTTP status code. Use for 'what does error 404 mean', 'what is HTTP 503'.",
+          {"code": _text("The code, e.g. '404'.")}, ["code"]),
+    _tool("port_info", "Say which service uses a network port, or which port a service uses. Use for 'what runs on port 443', 'which port does SSH use'.",
+          {"port": _text("A port number like '443' or a service name like 'ssh'.")}, ["port"]),
+    _tool("cron_explain", "Explain a cron schedule expression in plain words. Use for 'what does 0 9 * * 1-5 mean in cron'.",
+          {"expression": _text("The five-field cron expression, e.g. '0 9 * * 1-5'.")}, ["expression"]),
+    _tool("periodic_element", "Facts about a chemical element: symbol, atomic number, mass and group. Use for 'what is element 26', 'atomic mass of gold', 'what does Fe stand for'.",
+          {"element": _text("Name, symbol or atomic number, e.g. 'gold', 'Fe' or '26'.")}, ["element"]),
+    _tool("planet_info", "Facts about a planet: distance, size, day, year, moons, gravity, and the user's weight there. Use for 'how long is a day on Mars', 'what would I weigh on Jupiter'.",
+          {"planet": _text("The planet, e.g. 'Mars'."), "weight": _text("Optional body weight, e.g. '80 kg'.")}, ["planet"]),
+    _tool("triangle_solver", "Solve a triangle: hypotenuse, a missing leg, area and angles from two legs, a leg and the hypotenuse, or three sides. Use for 'legs 3 and 4', 'hypotenuse 13 and leg 5', 'sides 5 6 7'.",
+          {"known": _text("The known sides, e.g. 'legs 3 and 4' or 'hypotenuse 13 and leg 5' or 'sides 5 6 7'.")}, ["known"]),
+    _tool("combinatorics", "Factorials, permutations and combinations. Use for 'what is 10 factorial', '10 choose 3', 'how many ways to arrange 3 of 8'.",
+          {"n": _text("The total count n, e.g. '10'."), "r": _text("How many are picked, e.g. '3'. Leave empty for a factorial."),
+           "kind": _text("'combinations' (default), 'permutations' or 'factorial'.")}, ["n"]),
+    _tool("sequence_calc", "Fibonacci numbers and arithmetic or geometric sequences: the nth term and the sum. Use for 'the 20th Fibonacci number', 'sequence starting 2 step 3, the 10th term'.",
+          {"sequence": _text("'fibonacci', 'arithmetic' or 'geometric'."), "first": _text("First term for arithmetic or geometric, e.g. '2'."),
+           "step": _text("Difference (arithmetic) or ratio (geometric), e.g. '3'."), "n": _text("Which term, e.g. '10'.")}, ["sequence"]),
+    _tool("light_travel_time", "How long light, or a car or probe, takes to reach a place in space or cover a distance. Use for 'how long does light take from the Sun', 'how far is Proxima Centauri in travel time'.",
+          {"destination": _text("A place like 'moon', 'mars', 'proxima centauri', or a distance like '1000000 km'."),
+           "speed": _text("Optional travel speed, e.g. '58000 km/h'. Default a car at 100 km/h.")}, ["destination"]),
+    _tool("rule_of_72", "How long money takes to double at an interest rate, or the rate needed to double in some years. Use for 'when does my money double at 6 percent'.",
+          {"rate": _text("Yearly interest rate in percent, e.g. '6'."), "years": _text("Years to double, e.g. '10'. Use instead of the rate.")}),
+    _tool("profit_margin", "Profit, margin and markup from a cost and a selling price, or the price needed for a target margin. Use for 'cost 40 sells for 60', 'price for a 30 percent margin on 70'.",
+          {"cost": _text("What it costs, e.g. '40'."), "price": _text("Selling price, e.g. '60'."), "margin": _text("Target margin in percent, e.g. '30'.")}, ["cost"]),
+    _tool("loan_payoff", "Monthly payment and total interest of a loan, and how much sooner extra monthly payments finish it. Use for 'what if I pay 100 extra on my mortgage'.",
+          {"principal": _text("Loan amount, e.g. '200000'."), "rate": _text("Yearly interest rate in percent, e.g. '5'."),
+           "years": _text("Loan length in years, e.g. '20'."), "extra": _text("Extra payment per month, e.g. '100'. Optional.")}, ["principal", "rate", "years"]),
+    _tool("body_fat", "Estimate body fat percentage from tape measurements (US Navy method). Use for 'estimate my body fat'.",
+          {"gender": _text("'male' or 'female'."), "height": _text("Height, e.g. '180 cm' or '5 ft 10'."), "waist": _text("Waist at the navel, e.g. '85 cm'."),
+           "neck": _text("Neck, e.g. '38 cm'."), "hip": _text("Hip, only for women, e.g. '98 cm'.")}, ["gender", "height", "waist", "neck"]),
+    _tool("macro_split", "Split daily calories into grams of carbs, protein and fat for a goal. Use for 'macros for 2200 calories', 'protein for muscle gain on 2800 calories'.",
+          {"calories": _text("Daily calories, e.g. '2200'."), "goal": _text("'balanced' (default), 'fat loss', 'muscle gain', 'low carb' or 'keto'.")}, ["calories"]),
+    _tool("breathing_exercise", "Guide a breathing exercise. Use for 'help me calm down', 'box breathing', '4 7 8 breathing'.",
+          {"style": _text("'box' (default), '4-7-8', 'calm' or 'belly'.")}),
+    _tool("coffee_ratio", "Coffee and water amounts for a brew method. Use for 'how much coffee for 500 ml pour over', 'french press for 2 cups'.",
+          {"method": _text("'pour over', 'french press', 'espresso', 'aeropress', 'moka', 'cold brew' or 'drip'."),
+           "amount": _text("Water like '500 ml' or '2 cups', or coffee like '20 g'. Default one cup.")}, ["method"]),
+    _tool("oven_temperature", "Convert oven temperatures between Celsius, Fahrenheit, gas mark and fan oven. Use for '350 Fahrenheit in Celsius', 'gas mark 4', '180 C fan'.",
+          {"temperature": _text("e.g. '180 C', '350 F' or 'gas mark 4'.")}, ["temperature"]),
+    _tool("hacker_news", "Top stories on Hacker News. Use for 'what is on Hacker News', 'top tech stories for developers'.", {"count": _text("How many, 1 to 5. Default 3.")}),
+    _tool("xkcd", "Read an xkcd comic by its caption. Use for 'tell me today's xkcd', 'a random xkcd'.", {"which": _text("'latest' (default), 'random' or a comic number.")}),
+    _tool("people_in_space", "Who is in space right now and on which craft. Use for 'who is in space', 'how many astronauts are in orbit'."),
+    _tool("read_rss", "Read the latest headlines from any RSS or Atom feed URL. Use for 'read me this feed', 'latest from <site feed>'.",
+          {"url": _text("The feed URL, e.g. 'https://example.com/feed.xml'."), "count": _text("How many, 1 to 5. Default 3.")}, ["url"]),
+    _tool("tv_next_episode", "When the next episode of a TV show airs. Use for 'when is the next episode of Severance', 'is there a new season of ...'.",
+          {"show": _text("The show title, e.g. 'Severance'.")}, ["show"]),
+    _tool("game_deals", "Current discounts on PC games, or the cheapest price of one game. Use for 'any good game deals', 'is Hades on sale'.",
+          {"game": _text("Optional game title, e.g. 'Hades'. Leave empty for the best deals."), "count": _text("How many, 1 to 5. Default 3.")}),
+    _tool("dnd_spell", "Rules of a Dungeons and Dragons 5e spell. Use for 'what does fireball do', 'how does Shield work in D and D'.",
+          {"spell": _text("The spell name, e.g. 'fireball'.")}, ["spell"]),
+    _tool("postal_code", "Find which town a postal code belongs to. Use for 'which town is postal code 11000', 'what is ZIP 90210'.",
+          {"code": _text("The postal code, e.g. '11000'."), "country": _text("Optional country or two-letter code, e.g. 'CZ'. Default is the home country.")}, ["code"]),
+    _tool("mac_vendor", "Find the manufacturer of a network device from its MAC address. Use for 'who made the device with MAC 3C:5A:B4:12:34:56'.",
+          {"mac": _text("The MAC address, e.g. '3C:5A:B4:12:34:56'.")}, ["mac"]),
+]
+_EXTRA_SPECS.extend(_MORE_SPECS5)
+
+
 _DISABLED = {n.strip().lower() for n in _env("DISABLED_TOOLS").split(",") if n.strip()}
 TOOLS.extend(s for s in _EXTRA_SPECS if s["function"]["name"] not in _DISABLED)
 
@@ -6423,6 +7760,26 @@ _EXTRA_FUNCS.update({
     "battery_life": battery_life,
     "unix_time": unix_time,
 })
+# ---- the fifty more tools ------------------------------------------------
+_NEW_FUNCS = {f.__name__: f for f in (
+    remember_fact, recall_fact, save_contact, get_contact, log_mood, mood_trend, log_debt, debts_summary,
+    add_subscription, subscriptions_total, set_budget, budget_status, media_control, open_website, local_ip,
+    top_processes, find_file, word_count, change_case, caesar_cipher, base64_tool, hash_text, uuid_generator,
+    color_converter, http_status_info, port_info, cron_explain, periodic_element, planet_info, triangle_solver,
+    combinatorics, sequence_calc, light_travel_time, rule_of_72, profit_margin, loan_payoff, body_fat,
+    macro_split, breathing_exercise, coffee_ratio, oven_temperature, hacker_news, xkcd, people_in_space,
+    read_rss, tv_next_episode, game_deals, dnd_spell, postal_code, mac_vendor)}
+
+_NEW_EXCLUDED = {
+    "remember_fact", "recall_fact", "save_contact", "get_contact", "log_mood", "log_debt", "add_subscription",
+    "set_budget", "media_control", "open_website", "find_file", "word_count", "change_case", "caesar_cipher",
+    "base64_tool", "hash_text", "uuid_generator", "color_converter", "http_status_info", "port_info", "cron_explain",
+    "periodic_element", "planet_info", "triangle_solver", "combinatorics", "sequence_calc", "light_travel_time",
+    "rule_of_72", "profit_margin", "loan_payoff", "body_fat", "macro_split", "breathing_exercise", "coffee_ratio",
+    "oven_temperature", "dnd_spell", "postal_code", "mac_vendor",
+}
+
+_EXTRA_FUNCS.update(_NEW_FUNCS)
 TOOL_FUNCTIONS.update({n: f for n, f in _EXTRA_FUNCS.items() if n not in _DISABLED})
 
 # Tools that make no sense inside a scheduled automation (they are for live conversation).
@@ -6475,6 +7832,7 @@ _EXTRA_AUTOMATION_EXCLUDED |= {
     "battery_life",
     "unix_time",
 }
+_EXTRA_AUTOMATION_EXCLUDED |= _NEW_EXCLUDED
 AUTOMATION_EXCLUDED |= _EXTRA_AUTOMATION_EXCLUDED
 
 

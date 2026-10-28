@@ -3,7 +3,6 @@
 server.bat
 .ruff_cache/
 .vscode/
-dist/
 
 # Python
 __pycache__/
