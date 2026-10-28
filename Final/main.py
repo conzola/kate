@@ -17,7 +17,7 @@ from ASR.record import InterruptDetector, calibrate, get_speech_end_time
 from LLM.automatization import scheduler_loop
 from LLM.main import ask, reset_memory, split_continue
 from TTS.main import clean_text, stream_generate_audio, warmup
-from listen_kate import CHUNK_BYTES, SAMPLE_RATE, feed, load_model
+from Hey_Kate.listen_kate import CHUNK_BYTES, SAMPLE_RATE, feed, load_model
 
 MODEL_CONFIG = ROOT / "Hey_Kate" / "hey_kate.json"
 OUTPUT_WAV = "output_custom_voice.wav"

@@ -3,6 +3,7 @@
 server.bat
 .ruff_cache/
 .vscode/
+dist/
 
 # Python
 __pycache__/
@@ -20,3 +21,6 @@ conversation_log.txt
 output_custom_voice.wav
 esp_last_recording.wav
 esp_recordings/
+
+# Release artifacts
+dist/
