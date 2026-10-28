@@ -2,13 +2,13 @@
 
 # Kate · LLM
 
-**The local brain of a 250-tool voice assistant.**
+**The local brain of a 300-tool voice assistant.**
 
 One model. Plain-text tags. No cloud LLM calls.
 
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
 ![LM Studio](https://img.shields.io/badge/LM%20Studio-local-6E56CF)
-![Tools](https://img.shields.io/badge/tools-250-16A34A)
+![Tools](https://img.shields.io/badge/tools-300-16A34A)
 ![License](https://img.shields.io/badge/license-MIT-0EA5E9)
 
 </div>
@@ -17,7 +17,7 @@ One model. Plain-text tags. No cloud LLM calls.
 >
 > `ask()` sends the turn to a local model. The model replies in plain text and drops tool tags inline, like `<get_weather; "Prague"/>`. Before anything is spoken, Python replaces those tags with live results. The model never has to *know* today's weather, the news, or the time — it only has to know **how to ask**.
 
-This folder is the LLM layer of [Kate](../README.md): the part between speech recognition and speech synthesis. It owns the conversation, the 250-tool catalog, and the scheduler that runs little workflows later on its own.
+This folder is the LLM layer of [Kate](../README.md): the part between speech recognition and speech synthesis. It owns the conversation, the 300-tool catalog, and the scheduler that runs little workflows later on its own.
 
 ---
 
@@ -42,7 +42,7 @@ This folder is the LLM layer of [Kate](../README.md): the part between speech re
 | **Model** | Any OpenAI-compatible server. Default: [LM Studio](https://lmstudio.ai/) + `qwen3.5-4b` |
 | **Endpoint** | The LM Studio URL configured by `LM_URL` in `main.py` — loopback or a LAN host |
 | **Tool protocol** | Prompt-driven inline tags — **not** native function calling |
-| **Tool catalog** | **250** Python functions returning speech-ready strings |
+| **Tool catalog** | **300** Python functions returning speech-ready strings |
 | **Automation blocks** | Any registered tool; the same catalog powers chat and schedules |
 | **Memory** | Last 12 messages (6 exchanges); reset after 10 minutes idle |
 | **Dependencies** | `requests`; `psutil` is optional (only for `pc_status`) |
@@ -52,7 +52,7 @@ This folder is the LLM layer of [Kate](../README.md): the part between speech re
 | File | Responsibility |
 |---|---|
 | [`main.py`](main.py) | One turn: prompt assembly, LM Studio call, streaming, memory, `/continue` |
-| [`tools.py`](tools.py) | 250 tool functions, the tool spec catalog, tag parser, timers and personal data |
+| [`tools.py`](tools.py) | 300 tool functions, the tool spec catalog, tag parser, timers and personal data |
 | [`automatization.py`](automatization.py) | Recurring workflows, trigger parsing, the scheduler and automation tags |
 
 ### Why this design is interesting
@@ -129,7 +129,7 @@ flowchart LR
     F --> G["resolve_tool_tags()"]
     G --> H["spoken text<br/>+ /continue"]
     H --> I["TTS / speaker"]
-    G -. "HTTP + local JSON" .-> J["250 tools"]
+    G -. "HTTP + local JSON" .-> J["300 tools"]
     F -. "writes" .-> K["automatizations.json"]
     K -. "read by" .-> L["scheduler_loop()"]
     L -. "runs later" .-> J
@@ -195,7 +195,7 @@ Unknown tool names and tags that are never closed are **left as text**, not exec
 
 ## The tool catalog
 
-**250 tools**, grouped by what they are for. Each one returns a short string designed to be spoken, not raw JSON.
+**300 tools**, grouped by what they are for. Each one returns a short string designed to be spoken, not raw JSON.
 
 <details open>
 <summary><b>Time, weather & sky</b> · 21 tools</summary>
@@ -428,9 +428,91 @@ Unknown tool names and tags that are never closed are **left as text**, not exec
 </details>
 
 <details>
-<summary><b>Newest 50</b> · 50 tools</summary>
+<summary><b>Batch 1 (151–200)</b> · 50 tools</summary>
 
-The latest batch of tools, in the order they were added to `tools.py`.
+The first batch of 50 extra tools, in the order they were added to `tools.py`.
+
+**Memory, money and the PC**
+
+| Tool | What it does |
+|---|---|
+| `remember_fact` | Remember a fact for later |
+| `recall_fact` | Recall something the user asked you to remember |
+| `save_contact` | Save a person's phone number or email |
+| `get_contact` | Look up a saved contact |
+| `log_mood` | Write down today's mood from 1 to 10 |
+| `mood_trend` | How the logged mood went over a week, month or year |
+| `log_debt` | Track money lent or borrowed, or settle it |
+| `debts_summary` | Who owes the user money, and whom the user owes |
+| `add_subscription` | Save a recurring subscription, or cancel one |
+| `subscriptions_total` | Total subscription cost per month and per year |
+| `set_budget` | Set a monthly budget, overall or by category |
+| `budget_status` | How much of the budget is spent and left |
+| `media_control` | Play, pause, skip or mute music on the PC |
+| `open_website` | Open a website in the PC browser |
+| `local_ip` | The PC's local network address |
+| `top_processes` | Which programs use the most memory or CPU |
+| `find_file` | Find a file on the PC by part of its name |
+
+**Text, code and network**
+
+| Tool | What it does |
+|---|---|
+| `word_count` | Words, characters, sentences and reading time |
+| `change_case` | Upper, lower, title, snake, camel and other cases |
+| `caesar_cipher` | Caesar or ROT13 encode and decode |
+| `base64_tool` | Base64 encode or decode |
+| `hash_text` | MD5, SHA-1, SHA-256 or SHA-512 of a text |
+| `uuid_generator` | One or more random UUIDs |
+| `color_converter` | Name, hex, RGB and HSL colors, with the closest name |
+| `http_status_info` | What an HTTP status code means |
+| `port_info` | Which service uses a port, or which port a service uses |
+| `cron_explain` | A cron expression in plain words |
+
+**Science and maths**
+
+| Tool | What it does |
+|---|---|
+| `periodic_element` | Symbol, number, mass and group of a chemical element |
+| `planet_info` | Planet facts, including the user's weight there |
+| `triangle_solver` | Hypotenuse, missing side, area and angles |
+| `combinatorics` | Factorials, permutations and combinations |
+| `sequence_calc` | Fibonacci, arithmetic and geometric sequences |
+| `light_travel_time` | Travel time to a place in space or over a distance |
+| `rule_of_72` | When money doubles at an interest rate |
+| `profit_margin` | Profit, margin and markup from cost and price |
+| `loan_payoff` | Payment, total interest and the effect of overpaying |
+
+**Health and kitchen**
+
+| Tool | What it does |
+|---|---|
+| `body_fat` | Body fat estimate from tape measurements |
+| `macro_split` | Carbs, protein and fat grams for a calorie goal |
+| `breathing_exercise` | A guided breathing exercise |
+| `coffee_ratio` | Coffee and water amounts for a brew method |
+| `oven_temperature` | Celsius, Fahrenheit, gas mark and fan oven |
+
+**Internet and fun**
+
+| Tool | What it does |
+|---|---|
+| `hacker_news` | Top Hacker News stories |
+| `xkcd` | An xkcd comic by its caption |
+| `people_in_space` | Who is in space right now |
+| `read_rss` | Latest headlines from any RSS or Atom feed |
+| `tv_next_episode` | When the next episode of a show airs |
+| `game_deals` | PC game discounts, or the cheapest price of one game |
+| `dnd_spell` | Rules of a Dungeons and Dragons 5e spell |
+| `postal_code` | Which town a postal code belongs to |
+| `mac_vendor` | The manufacturer behind a MAC address |
+
+</details>
+
+<details>
+<summary><b>Batch 2 (201–250)</b> · 50 tools</summary>
+
+The second batch of tools, in the order they were added to `tools.py`.
 
 **Weather, sky and the internet**
 
@@ -514,6 +596,103 @@ The latest batch of tools, in the order they were added to `tools.py`.
 
 </details>
 
+<details>
+<summary><b>Batch 3 (251–300)</b> · 50 tools</summary>
+
+The third batch of tools, in the order they were added to `tools.py`.
+
+**Weather and outdoors**
+
+| Tool | What it does |
+|---|---|
+| `snow_report` | Expected snowfall and snow depth for today or tomorrow |
+| `driving_conditions` | Visibility, rain, wind and ice risk for the next hours |
+| `surf_report` | Wave height, period, direction and sea temperature |
+| `frost_risk` | Overnight low and whether frost is likely |
+| `plant_water` | Whether the garden needs watering from recent and forecast rain |
+| `laundry_drying` | Whether laundry will dry outside today |
+| `stargazing_conditions` | Cloud cover, moon brightness and the dark window tonight |
+| `constellation_info` | Facts, brightest star and best months for a constellation |
+
+**Home and garden**
+
+| Tool | What it does |
+|---|---|
+| `wallpaper_calculator` | Rolls of wallpaper for a room, with pattern repeat and openings |
+| `board_foot` | Board feet and cost from lumber dimensions |
+| `roof_pitch` | Pitch ratio, angle and slope from a roof pitch |
+| `stair_calculator` | Risers, riser height and tread depth for a staircase |
+| `mulch_calculator` | Mulch or soil volume and bags for a bed |
+| `grass_seed` | Grass seed quantity for a lawn |
+| `fence_calculator` | Posts, panels and concrete for a fence run |
+| `room_heating` | Heater or air conditioner size for a room |
+
+**Kitchen**
+
+| Tool | What it does |
+|---|---|
+| `rice_ratio` | Water ratio and cooking time by rice type |
+| `pizza_dough` | Flour, water, yeast and salt for a number of pizzas |
+| `brine_calculator` | Salt and water for wet or dry brining |
+| `cake_pan` | Convert a recipe between pan sizes |
+| `spice_substitute` | A substitute for a spice or herb |
+| `freezer_storage` | How long a food keeps in the fridge and freezer |
+
+**Health**
+
+| Tool | What it does |
+|---|---|
+| `a1c_convert` | Convert HbA1c between percent and mmol/mol, with average glucose |
+| `cholesterol_ratio` | Total cholesterol to HDL ratio |
+| `ideal_weight` | Healthy weight range and a rough ideal weight for a height |
+| `protein_target` | Daily protein grams by weight and activity |
+| `bac_estimate` | Rough blood alcohol estimate from drinks, weight and time |
+
+**Travel and everyday**
+
+| Tool | What it does |
+|---|---|
+| `airport_lookup` | Airport name and city from an IATA code or city |
+| `emergency_numbers` | The emergency phone number for a country |
+| `shoe_size` | Convert a shoe size between EU, US, UK and centimetres |
+| `ring_size` | Convert a ring size between US, UK, EU and millimetres |
+| `meeting_time_overlap` | Best overlapping working hours between two places |
+
+**Tech and internet**
+
+| Tool | What it does |
+|---|---|
+| `dns_records` | MX, TXT and NS records for a domain |
+| `email_validator` | Check the syntax and mail server of an email address |
+| `redirect_chain` | Where a web address redirects, and the final address |
+| `password_strength` | Estimate password strength and crack time, locally |
+| `cron_next` | The next run times of a five-field cron expression |
+| `mime_type` | MIME type for a file extension, or extensions for a MIME type |
+| `chmod_calculator` | Convert between octal and symbolic file permissions |
+| `user_agent_parse` | Browser and operating system from a user agent string |
+| `xml_format` | Check whether XML is valid and describe it |
+
+**Text and writing**
+
+| Tool | What it does |
+|---|---|
+| `readability_score` | Reading ease and grade level of a text |
+| `slugify` | A URL-friendly slug from a title |
+| `anonymize_text` | Redact emails, phone numbers and links from a text |
+| `extract_entities` | Pull emails, links, phone numbers and dates from a text |
+
+**Fun, music and school**
+
+| Tool | What it does |
+|---|---|
+| `riddle` | Ask a riddle, or reveal the answer to the last one |
+| `would_you_rather` | A random would-you-rather question |
+| `story_starter` | A creative writing prompt |
+| `transpose_chords` | Transpose a chord progression by a number of semitones |
+| `gpa_calculator` | GPA from letter grades and optional credits |
+
+</details>
+
 > **Adding your own:** see [Extending the catalog](#extending-the-catalog). The tool prompt and the automation block list are generated from the same `TOOLS` list, so the two features stay in sync.
 
 ---
@@ -574,7 +753,7 @@ The `automatization` spelling is the one used by the code and tags. Removal matc
 
 Any registered tool can be written as a block. That flexibility is best used for read-only information tools. Timers, the stopwatch, random one-shots and tools that change personal data are poor fits — they depend on the moment or on a live user.
 
-Read-only tools added later fit well too: `what_to_wear`, `clock_change`, `long_weekends`, `ssl_expiry`, `next_launch` and `weight_trend`. The newest batch adds `sky_tonight`, `meteor_shower`, `aurora_forecast`, `air_quality_forecast`, `trending_searches`, `golden_hour` and `weekly_review`. For example, `<new_automatization; time="on weekdays at 7:30 AM"; actions="what_to_wear=\"Prague\""/>` tells you what to put on every morning.
+Read-only tools added later fit well too: `what_to_wear`, `clock_change`, `long_weekends`, `ssl_expiry`, `next_launch` and `weight_trend`. The second batch adds `sky_tonight`, `meteor_shower`, `aurora_forecast`, `air_quality_forecast`, `trending_searches`, `golden_hour` and `weekly_review`. The newest batch adds `snow_report`, `frost_risk`, `plant_water`, `laundry_drying` and `stargazing_conditions`. For example, `<new_automatization; time="on weekdays at 7:30 AM"; actions="what_to_wear=\"Prague\""/>` tells you what to put on every morning.
 
 `set_volume` is a deliberate exception: "every night at 10 PM turn the volume down" is a legitimate automation.
 

@@ -10,6 +10,7 @@ import inspect
 import ipaddress
 import json
 import math
+import mimetypes
 import operator
 import os
 import random
@@ -21,6 +22,7 @@ import ssl
 import statistics
 import threading
 import time
+import unicodedata
 import uuid
 import webbrowser
 from datetime import date, datetime, timedelta, timezone
@@ -9323,6 +9325,1592 @@ def lottery_numbers(game: str = "eurojackpot") -> str:
     return text + ". Good luck"
 
 
+# =============================================================================
+# NEWEST TOOLS (50 MORE): weather and outdoors, home and garden, kitchen,
+# health, travel, tech, text, fun, music and school. All keyless or plain
+# Python, and every result is written to be spoken.
+# =============================================================================
+def _n_area_m2(text):
+    """An area in square metres from '20 square meters' or '4 by 5 meters'."""
+    low = str(text or "").lower()
+    values = _floats(low)
+    if not values:
+        return None
+    if re.search(r"\b(square|sq)\b|m2|m²", low):
+        return values[0]
+    factor = 0.092903 if re.search(r"\b(ft|feet|foot)\b|'", low) else 1.0
+    if len(values) >= 2 and re.search(r"\b(by|x|×)\b", low):
+        return values[0] * values[1] * factor * factor
+    return values[0] * factor * factor
+
+
+def _n_unit_kind(text):
+    """The length unit in a phrase, as a short code."""
+    low = str(text or "").lower()
+    if re.search(r"\bmm\b|millimet", low):
+        return "mm"
+    if re.search(r"\bcm\b|centimet", low):
+        return "cm"
+    if re.search(r"\bkm\b|kilomet", low):
+        return "km"
+    if re.search(r"\b(ft|feet|foot)\b|'", low):
+        return "ft"
+    if re.search(r"\b(in|inch|inches)\b|\"", low):
+        return "in"
+    if re.search(r"\bm\b|metre|meter", low):
+        return "m"
+    return ""
+
+
+def _n_len_m(text, default=None):
+    """A length in metres, defaulting to metres when no unit is given."""
+    values = _floats(text)
+    if not values:
+        return default
+    value = values[0]
+    return {"mm": value / 1000, "cm": value / 100, "km": value * 1000,
+            "ft": value * 0.3048, "in": value * 0.0254}.get(_n_unit_kind(text), value)
+
+
+def _n_cm(text, default=None):
+    """A length in centimetres."""
+    value = _first_float(text)
+    if value is None:
+        return default
+    return {"mm": value / 10, "cm": value, "km": value * 100000,
+            "ft": value * 30.48, "in": value * 2.54, "m": value * 100}.get(_n_unit_kind(text), value)
+
+
+def _n_inches(text):
+    """A length in inches."""
+    value = _first_float(text)
+    if value is None:
+        return None
+    return {"mm": value / 25.4, "cm": value / 2.54, "km": value * 39370.1,
+            "ft": value * 12, "m": value * 39.3701}.get(_n_unit_kind(text), value)
+
+
+def _n_feet(text):
+    """A length in feet, defaulting to feet when no unit is given."""
+    value = _first_float(text)
+    if value is None:
+        return None
+    return {"mm": value / 304.8, "cm": value / 30.48, "km": value * 3280.84,
+            "in": value / 12, "m": value * 3.28084}.get(_n_unit_kind(text), value)
+
+
+def _n_kg(text):
+    """A weight in kilograms."""
+    low = str(text or "").lower()
+    value = _first_float(text)
+    if value is None:
+        return None
+    if re.search(r"\b(lb|lbs|pound)", low):
+        return value * 0.453592
+    if re.search(r"\b(kg|kilo)", low):
+        return value
+    if re.search(r"\b(g|gram)", low):
+        return value / 1000
+    return value
+
+
+# ---- weather and outdoors ---------------------------------------------------
+def snow_report(location: str = "", day: str = "today") -> str:
+    """Expected snowfall and snow depth for today or tomorrow."""
+    place = _geocode(location)
+    if not place:
+        return _no_place(location)
+    target = date.today() + timedelta(days=1 if "tomorrow" in (day or "").lower() else 0)
+    data = _get("https://api.open-meteo.com/v1/forecast",
+                {"latitude": place["latitude"], "longitude": place["longitude"], "timezone": "auto",
+                 "forecast_days": 3,
+                 "daily": "snowfall_sum,precipitation_sum,temperature_2m_max,temperature_2m_min",
+                 "hourly": "snow_depth"})
+    daily = (data or {}).get("daily") or {}
+    hourly = (data or {}).get("hourly") or {}
+    times = daily.get("time") or []
+    if target.isoformat() not in times:
+        return "Sorry, I could not get the snow forecast"
+    index = times.index(target.isoformat())
+    try:
+        new_snow = daily.get("snowfall_sum", [0] * len(times))[index] or 0
+        depth_values = [hourly["snow_depth"][i] for i, stamp in enumerate(hourly.get("time") or [])
+                        if str(stamp).startswith(target.isoformat())
+                        and hourly.get("snow_depth") and hourly["snow_depth"][i] is not None]
+        depth = (max(depth_values) if depth_values else 0) * 100
+    except (IndexError, TypeError, ValueError):
+        return "Sorry, I could not read the snow forecast"
+    when = "tomorrow" if target != date.today() else "today"
+    if new_snow < 0.1 and depth < 1:
+        return f"No snow expected in {_n_place_name(place)} {when}"
+    text = f"{when.capitalize()} in {_n_place_name(place)}"
+    if new_snow >= 0.1:
+        text += f", about {_num(round(new_snow, 1))} centimeters of new snow"
+    if depth >= 1:
+        text += f", with {_num(round(depth))} centimeters already on the ground"
+    return text
+
+
+def driving_conditions(location: str = "", hours: str = "6") -> str:
+    """Visibility, rain, wind and ice risk for the next hours."""
+    place = _geocode(location)
+    if not place:
+        return _no_place(location)
+    try:
+        span = max(1, min(12, int(re.search(r"\d+", str(hours or "6")).group())))
+    except (AttributeError, ValueError):
+        span = 6
+    data = _get("https://api.open-meteo.com/v1/forecast",
+                {"latitude": place["latitude"], "longitude": place["longitude"], "timezone": "auto",
+                 "forecast_days": 2,
+                 "hourly": "visibility,precipitation,weather_code,temperature_2m,wind_speed_10m"})
+    hourly = (data or {}).get("hourly") or {}
+    times = hourly.get("time") or []
+    now = datetime.now().replace(minute=0, second=0, microsecond=0)
+    rows = [i for i, stamp in enumerate(times) if datetime.fromisoformat(stamp) >= now][:span]
+    if not rows:
+        return "Sorry, I could not get the driving conditions"
+
+    def values(key, default=0.0):
+        column = hourly.get(key) or []
+        return [column[i] for i in rows if i < len(column) and column[i] is not None] or [default]
+
+    visibility = min(values("visibility", 10000))
+    rain = max(values("precipitation", 0.0))
+    wind = max(values("wind_speed_10m", 0.0))
+    cold = min(values("temperature_2m", 10.0))
+    codes = values("weather_code", 0)
+    text = f"for the next {span} hours around {_n_place_name(place)}"
+    if visibility < 500:
+        text += ", visibility is very poor, under 500 meters"
+    elif visibility < 2000:
+        text += f", visibility is down to about {_num(round(visibility / 1000, 1))} kilometers"
+    else:
+        text += ", visibility is good"
+    if rain >= 0.5:
+        text += f", with up to {_num(round(rain, 1))} millimeters of precipitation an hour"
+    if cold <= 2 and rain >= 0.1:
+        text += ", so watch for ice on the roads"
+    elif cold <= 0:
+        text += ", and it is below freezing"
+    if wind >= 50:
+        text += f", strong wind up to {_num(round(wind))} kilometers per hour"
+    if any(code in (45, 48) for code in codes):
+        text += ", with fog"
+    return text
+
+
+def surf_report(location: str = "") -> str:
+    """Wave height, period, direction and sea temperature."""
+    place = _geocode(location)
+    if not place:
+        return _no_place(location)
+    data = _get("https://marine-api.open-meteo.com/v1/marine",
+                {"latitude": place["latitude"], "longitude": place["longitude"], "timezone": "auto",
+                 "current": "wave_height,wave_period,wave_direction,sea_surface_temperature"})
+    current = (data or {}).get("current") or {}
+    height = current.get("wave_height")
+    if height is None:
+        return f"I have no sea data for {_n_place_name(place)}"
+    text = f"waves in {_n_place_name(place)} are about {_num(round(height, 1))} meters"
+    period = current.get("wave_period")
+    if period:
+        text += f" every {_num(round(period))} seconds"
+    direction = current.get("wave_direction")
+    if direction is not None:
+        text += f", coming from the {_n_compass(direction)}"
+    temp = current.get("sea_surface_temperature")
+    if temp is not None:
+        text += f", water temperature {_num(round(temp))} degrees Celsius"
+    return text
+
+
+def frost_risk(location: str = "") -> str:
+    """Overnight low and whether frost is likely."""
+    place = _geocode(location)
+    if not place:
+        return _no_place(location)
+    data = _get("https://api.open-meteo.com/v1/forecast",
+                {"latitude": place["latitude"], "longitude": place["longitude"], "timezone": "auto",
+                 "forecast_days": 3,
+                 "daily": "temperature_2m_min,temperature_2m_max,precipitation_sum,wind_speed_10m_max"})
+    daily = (data or {}).get("daily") or {}
+    times = daily.get("time") or []
+    if len(times) < 2:
+        return "Sorry, I could not get the overnight temperature"
+    try:
+        low = daily["temperature_2m_min"][1]
+        high = daily["temperature_2m_max"][1]
+    except (KeyError, IndexError, TypeError):
+        return "Sorry, I could not read the overnight temperature"
+    if low is None:
+        return "Sorry, I could not get the overnight temperature"
+    if low <= 0:
+        return (f"a hard frost is likely in {_n_place_name(place)} tonight, down to {_num(round(low))} degrees, "
+                "cover tender plants or bring them inside")
+    if low <= 2:
+        return (f"frost is possible in {_n_place_name(place)} tonight, down to {_num(round(low))} degrees, "
+                "protect anything sensitive")
+    text = f"no frost expected in {_n_place_name(place)} tonight, the low is about {_num(round(low))} degrees"
+    if high is not None:
+        text += f" and the day reaches {_num(round(high))}"
+    return text
+
+
+def plant_water(location: str = "") -> str:
+    """Whether the garden needs watering from recent and forecast rain."""
+    place = _geocode(location)
+    if not place:
+        return _no_place(location)
+    data = _get("https://api.open-meteo.com/v1/forecast",
+                {"latitude": place["latitude"], "longitude": place["longitude"], "timezone": "auto",
+                 "past_days": 3, "forecast_days": 3,
+                 "daily": "precipitation_sum,et0_fao_evapotranspiration,temperature_2m_max"})
+    daily = (data or {}).get("daily") or {}
+    times = daily.get("time") or []
+    rain = daily.get("precipitation_sum") or []
+    et0 = daily.get("et0_fao_evapotranspiration") or []
+    if not rain:
+        return "Sorry, I could not get the rain forecast"
+    today = date.today().isoformat()
+    past = [rain[i] for i, stamp in enumerate(times) if stamp < today and i < len(rain) and rain[i] is not None]
+    future = [rain[i] for i, stamp in enumerate(times) if stamp >= today and i < len(rain) and rain[i] is not None]
+    recent = sum(past[-3:])
+    coming = sum(future[:2])
+    loss = sum(value for value in et0 if value is not None)
+    if coming >= 5:
+        return (f"no need to water in {_n_place_name(place)}, about {_num(round(coming, 1))} millimeters of rain "
+                "is coming in the next two days")
+    if recent >= 10:
+        return (f"the garden in {_n_place_name(place)} got about {_num(round(recent, 1))} millimeters of rain "
+                "in the last three days, so it can wait")
+    if loss and recent + coming < loss * 0.5:
+        return (f"the garden in {_n_place_name(place)} is probably dry, only {_num(round(recent + coming, 1))} "
+                f"millimeters of rain against about {_num(round(loss, 1))} millimeters of evaporation, "
+                "water deeply in the morning")
+    return (f"a light watering may help in {_n_place_name(place)}, about {_num(round(recent + coming, 1))} "
+            "millimeters of rain recently and coming")
+
+
+def laundry_drying(location: str = "") -> str:
+    """Whether laundry will dry outside today."""
+    place = _geocode(location)
+    if not place:
+        return _no_place(location)
+    data = _get("https://api.open-meteo.com/v1/forecast",
+                {"latitude": place["latitude"], "longitude": place["longitude"], "timezone": "auto",
+                 "forecast_days": 1,
+                 "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m,"
+                           "precipitation_probability,precipitation"})
+    hourly = (data or {}).get("hourly") or {}
+    times = hourly.get("time") or []
+    rows = [i for i, stamp in enumerate(times) if 8 <= datetime.fromisoformat(stamp).hour <= 19]
+    if not rows:
+        return "Sorry, I could not get the drying weather"
+
+    def average(key, default=0.0):
+        column = hourly.get(key) or []
+        found = [column[i] for i in rows if i < len(column) and column[i] is not None]
+        return sum(found) / len(found) if found else default
+
+    temp = average("temperature_2m", 15)
+    humidity = average("relative_humidity_2m", 60)
+    wind = average("wind_speed_10m", 10)
+    rain = max([hourly.get("precipitation_probability", [0] * len(times))[i] or 0 for i in rows] or [0])
+    wet = max([hourly.get("precipitation", [0] * len(times))[i] or 0 for i in rows] or [0])
+    reasons = []
+    if rain >= 40 or wet >= 0.2:
+        reasons.append("rain is likely")
+    if humidity >= 80:
+        reasons.append("the air is damp")
+    if temp < 12:
+        reasons.append("it is cool")
+    if wind < 6:
+        reasons.append("there is little wind")
+    if len(reasons) >= 2 or rain >= 60:
+        return f"better dry laundry inside in {_n_place_name(place)} today, " + ", ".join(reasons)
+    if reasons:
+        return f"laundry will dry slowly outside in {_n_place_name(place)} today, " + ", ".join(reasons)
+    return (f"good drying weather in {_n_place_name(place)} today, about {_num(round(temp))} degrees, "
+            f"wind {_num(round(wind))} kilometers per hour and humidity {_num(round(humidity))} percent")
+
+
+def stargazing_conditions(location: str = "") -> str:
+    """Cloud cover, moon brightness and the dark window tonight."""
+    place = _geocode(location)
+    if not place:
+        return _no_place(location)
+    data = _get("https://api.open-meteo.com/v1/forecast",
+                {"latitude": place["latitude"], "longitude": place["longitude"], "timezone": "auto",
+                 "forecast_days": 2, "daily": "sunrise,sunset",
+                 "hourly": "cloud_cover,precipitation_probability"})
+    daily = (data or {}).get("daily") or {}
+    hourly = (data or {}).get("hourly") or {}
+    try:
+        sunset = datetime.fromisoformat(daily["sunset"][0])
+        sunrise = datetime.fromisoformat(daily["sunrise"][1])
+    except (KeyError, IndexError, TypeError, ValueError):
+        return "Sorry, I could not get tonight's sky"
+    times = hourly.get("time") or []
+    rows = [i for i, stamp in enumerate(times) if sunset <= datetime.fromisoformat(stamp) <= sunrise]
+    if not rows:
+        return "Sorry, I could not get tonight's cloud cover"
+    clouds = [hourly.get("cloud_cover", [0] * len(times))[i] for i in rows
+              if hourly.get("cloud_cover") and hourly["cloud_cover"][i] is not None]
+    rain = [hourly.get("precipitation_probability", [0] * len(times))[i] for i in rows
+            if hourly.get("precipitation_probability") and hourly["precipitation_probability"][i] is not None]
+    cover = sum(clouds) / len(clouds) if clouds else 0
+    chance = max(rain) if rain else 0
+    phase, lit = _n_moon_now()
+    if cover <= 25 and chance <= 20:
+        quality = "good"
+    elif cover <= 60 and chance <= 40:
+        quality = "mixed"
+    else:
+        quality = "poor"
+    text = (f"tonight in {_n_place_name(place)} looks {quality}, average cloud cover {_num(round(cover))} percent "
+            f"and a {phase} about {lit} percent lit")
+    if chance >= 30:
+        text += f", with a {_num(round(chance))} percent chance of rain"
+    if quality == "good" and lit >= 60:
+        text += ", the bright moon will wash out faint stars"
+    elif quality == "good":
+        text += ", a good night for the constellations"
+    return text
+
+
+_CONSTELLATIONS = {
+    "orion": ("Orion", "December to February", "Betelgeuse and Rigel",
+              "look for three evenly spaced stars in a short line, the belt"),
+    "ursa major": ("Ursa Major", "March to June", "Alioth",
+                   "the Big Dipper is part of it, and its two end stars point to Polaris"),
+    "ursa minor": ("Ursa Minor", "all year from the north", "Polaris",
+                   "Polaris sits almost exactly above the north"),
+    "cassiopeia": ("Cassiopeia", "September to January", "Schedar", "look for a bright W or M shape"),
+    "cygnus": ("Cygnus", "June to October", "Deneb", "the Northern Cross lies along the Milky Way"),
+    "lyra": ("Lyra", "June to October", "Vega", "Vega is one corner of the Summer Triangle"),
+    "aquila": ("Aquila", "July to October", "Altair", "Altair is the southern corner of the Summer Triangle"),
+    "scorpius": ("Scorpius", "June to August", "Antares", "a curved tail of stars near the southern horizon"),
+    "sagittarius": ("Sagittarius", "July to September", "Kaus Australis",
+                    "the Teapot shape points toward the Milky Way core"),
+    "leo": ("Leo", "March to May", "Regulus", "look for a backwards question mark, the Sickle"),
+    "taurus": ("Taurus", "November to February", "Aldebaran",
+               "the V-shaped face of the bull, with the Pleiades nearby"),
+    "gemini": ("Gemini", "December to March", "Pollux", "two bright twins, Castor and Pollux"),
+    "canis major": ("Canis Major", "December to March", "Sirius", "Sirius is the brightest star in the night sky"),
+    "canis minor": ("Canis Minor", "January to March", "Procyon", "a small pair with bright Procyon"),
+    "auriga": ("Auriga", "December to April", "Capella", "a pentagon shape high in the winter sky"),
+    "perseus": ("Perseus", "November to February", "Mirfak",
+                "a curve of stars, and the radiant of the Perseids"),
+    "andromeda": ("Andromeda", "September to December", "Alpheratz",
+                  "the Andromeda Galaxy is a faint smudge nearby"),
+    "pegasus": ("Pegasus", "September to December", "Enif", "the Great Square of Pegasus is easy to spot"),
+    "crux": ("Crux", "March to June in the south", "Acrux", "the Southern Cross points toward the south pole"),
+    "centaurus": ("Centaurus", "March to June in the south", "Rigil Kentaurus",
+                  "the closest star system, Alpha Centauri, is here"),
+    "carina": ("Carina", "January to April in the south", "Canopus",
+               "Canopus is the second brightest star in the sky"),
+    "bootes": ("Bootes", "April to August", "Arcturus", "follow the arc of the Big Dipper handle to Arcturus"),
+    "virgo": ("Virgo", "March to June", "Spica", "Spica is a bright blue-white star"),
+    "libra": ("Libra", "April to July", "Zubeneschamali", "a faint pair of scales between Virgo and Scorpius"),
+    "capricornus": ("Capricornus", "August to October", "Deneb Algedi", "a faint triangle in the southern sky"),
+    "aquarius": ("Aquarius", "August to November", "Sadalsuud", "a faint water bearer near the Great Square"),
+    "pisces": ("Pisces", "September to January", "Eta Piscium", "a faint pair of fish tied together"),
+    "aries": ("Aries", "September to December", "Hamal", "a small bent line of three stars"),
+    "cancer": ("Cancer", "January to April", "Tarf", "the Beehive Cluster is a faint patch inside it"),
+}
+
+
+def constellation_info(name: str = "") -> str:
+    """Facts, brightest star and best months for a constellation."""
+    key = " ".join(str(name or "").lower().replace("the ", " ").split())
+    if not key:
+        return "Tell me which constellation, like Orion"
+    found = next((value for name_key, value in _CONSTELLATIONS.items()
+                  if key in name_key or name_key in key), None)
+    if not found:
+        return f"I do not know the constellation {name}"
+    title, months, star, tip = found
+    return f"{title} is best seen in {months}, its brightest star is {star}, {tip}"
+
+
+# ---- home and garden --------------------------------------------------------
+def wallpaper_calculator(room: str = "", height: str = "", openings: str = "",
+                         roll: str = "", repeat: str = "") -> str:
+    """Rolls of wallpaper for a room, with pattern repeat and openings."""
+    dims = _n_dims(room)
+    if len(dims) < 2:
+        return "Tell me the room size, like 4 by 5 meters"
+    wall_height = _n_len_m(height, 2.5)
+    opening_area = _n_area_m2(openings) if (openings or "").strip() else 3.5
+    if opening_area is None:
+        opening_area = 3.5
+    roll_dims = _n_dims(roll) if (roll or "").strip() else [0.53, 10.0]
+    roll_width = roll_dims[0] if roll_dims else 0.53
+    roll_length = roll_dims[1] if len(roll_dims) > 1 else 10.0
+    pattern = _first_float(repeat, 0.0) or 0.0
+    if pattern > 1:
+        pattern /= 100
+    perimeter = 2 * (dims[0] + dims[1])
+    wall_area = max(0.0, perimeter * wall_height - opening_area)
+    strips_per_roll = max(1, int((roll_length - pattern) // wall_height))
+    strips = math.ceil(wall_area / max(0.1, roll_width * wall_height) * 1.1)
+    rolls = math.ceil(strips / strips_per_roll)
+    return (f"you need about {rolls} {'roll' if rolls == 1 else 'rolls'} of wallpaper for "
+            f"{_num(round(wall_area))} square meters of wall, that is {strips} strips")
+
+
+def board_foot(thickness: str = "", width: str = "", length: str = "",
+               quantity: str = "1", price: str = "") -> str:
+    """Board feet and cost from lumber dimensions."""
+    thick = _n_inches(thickness)
+    wide = _n_inches(width)
+    long = _n_feet(length)
+    try:
+        count = max(1, int(_first_float(quantity, 1)))
+    except (TypeError, ValueError):
+        count = 1
+    if not thick or not wide or not long:
+        return "Tell me the thickness, width and length, like 2 by 4 inches and 8 feet"
+    feet = thick * wide * long / 12 * count
+    text = f"{count} {'piece' if count == 1 else 'pieces'} is {_num(round(feet, 2))} board feet"
+    cost = _amount(price)
+    if cost:
+        text += f", about {_cash(feet * cost)} at {_cash(cost)} per board foot"
+    return text
+
+
+def roof_pitch(pitch: str = "") -> str:
+    """Pitch ratio, angle and slope from a roof pitch."""
+    text = str(pitch or "").lower()
+    if not text.strip():
+        return "Tell me the roof pitch, like 6/12 or 30 degrees"
+    ratio = re.search(r"(\d+(?:\.\d+)?)\s*(?:/|in|to)\s*(\d+(?:\.\d+)?)", text)
+    if ratio:
+        rise, run = float(ratio.group(1)), float(ratio.group(2))
+    else:
+        angle_value = _first_float(text)
+        if angle_value is None:
+            return "Tell me the roof pitch, like 6/12 or 30 degrees"
+        run = 12.0
+        rise = math.tan(math.radians(angle_value)) * run
+    if run <= 0:
+        return "Tell me the roof pitch, like 6/12 or 30 degrees"
+    slope = rise / run
+    angle = math.degrees(math.atan(slope))
+    multiplier = math.sqrt(1 + slope * slope)
+    return (f"a {_num(round(rise, 1))} in {_num(round(run))} pitch is {_num(round(angle, 1))} degrees, "
+            f"a {_num(round(slope * 100))} percent slope, with a roof multiplier of {_num(round(multiplier, 2))}")
+
+
+def stair_calculator(total_rise: str = "", tread: str = "") -> str:
+    """Risers, riser height and tread depth for a staircase."""
+    rise_cm = _n_cm(total_rise)
+    if not rise_cm or rise_cm <= 0:
+        return "Tell me the total rise, like 2.7 meters"
+    risers = max(2, min(20, round(rise_cm / 18)))
+    riser = rise_cm / risers
+    tread_cm = _n_cm(tread) if (tread or "").strip() else 63 - 2 * riser
+    tread_cm = max(22.0, min(32.0, tread_cm))
+    run = (risers - 1) * tread_cm
+    return (f"{risers} risers at {_num(round(riser, 1))} centimeters each, tread depth "
+            f"{_num(round(tread_cm, 1))} centimeters, total run {_num(round(run / 100, 2))} meters")
+
+
+def mulch_calculator(area: str = "", depth: str = "") -> str:
+    """Mulch or soil volume and bags for a bed."""
+    size = _n_area_m2(area)
+    if not size:
+        return "Tell me the area, like 4 by 5 meters"
+    depth_cm = _n_cm(depth, 5.0)
+    volume = size * depth_cm / 100
+    bags = math.ceil(volume * 1000 / 50)
+    unit = "cubic meter" if round(volume, 2) == 1 else "cubic meters"
+    return (f"you need about {_num(round(volume, 2))} {unit} of mulch for {_num(round(size))} "
+            f"square meters at {_num(round(depth_cm))} centimeters deep, about {bags} bags of 50 liters")
+
+
+def grass_seed(area: str = "", rate: str = "") -> str:
+    """Grass seed quantity for a lawn."""
+    size = _n_area_m2(area)
+    if not size:
+        return "Tell me the lawn area, like 100 square meters"
+    grams = _first_float(rate, 30.0) or 30.0
+    kg = size * grams / 1000
+    return (f"you need about {_num(round(kg, 2))} kilograms of grass seed for {_num(round(size))} "
+            f"square meters at {_num(round(grams))} grams per square meter")
+
+
+def fence_calculator(length: str = "", spacing: str = "", panel: str = "",
+                     concrete: str = "") -> str:
+    """Posts, panels and concrete for a fence run."""
+    run = _n_len_m(length)
+    if not run:
+        return "Tell me the fence length, like 20 meters"
+    gap = _n_len_m(spacing, 2.4) or 2.4
+    posts = max(2, math.floor(run / gap) + 1)
+    panels = posts - 1
+    panel_width = _n_len_m(panel) if (panel or "").strip() else gap
+    if panel_width and panel_width > 0:
+        panels = max(1, math.ceil(run / panel_width))
+    bags_per_post = _first_float(concrete, 2.0) or 2.0
+    bags = math.ceil(posts * bags_per_post)
+    return (f"for {_num(round(run, 1))} meters of fence you need about {posts} posts, "
+            f"{panels} panels or bays, and {bags} bags of concrete")
+
+
+def room_heating(room: str = "", height: str = "", insulation: str = "average") -> str:
+    """Heater or air conditioner size for a room."""
+    dims = _n_dims(room)
+    if not dims:
+        return "Tell me the room size, like 4 by 5 meters"
+    area = dims[0] * dims[1] if len(dims) > 1 else dims[0]
+    high = _n_len_m(height, 2.5)
+    volume = area * high
+    low = (insulation or "average").lower()
+    factor = 60 if "poor" in low else 30 if "good" in low else 40
+    watts = volume * factor
+    return (f"you need roughly {_num(round(watts / 1000, 1))} kilowatts, or "
+            f"{_num(round(watts * 3.412))} BTU, to heat or cool {_num(round(area))} square meters")
+
+
+# ---- kitchen ----------------------------------------------------------------
+_RICE = {
+    "white": ("1 to 1.75", 15, "rinse, bring to a boil, cover and simmer"),
+    "long grain": ("1 to 1.75", 15, "rinse, boil, cover and simmer"),
+    "brown": ("1 to 2.5", 40, "rinse, boil, cover and simmer"),
+    "jasmine": ("1 to 1.5", 15, "rinse, boil, cover and simmer"),
+    "basmati": ("1 to 1.5", 15, "rinse and soak for 15 minutes first"),
+    "sushi": ("1 to 1.1", 15, "rinse until the water runs clear"),
+    "wild": ("1 to 3", 45, "simmer until the grains burst"),
+    "risotto": ("1 to 3", 20, "add the stock a little at a time and stir"),
+    "quinoa": ("1 to 2", 15, "rinse well before cooking"),
+}
+
+
+def rice_ratio(rice: str = "", cups: str = "1") -> str:
+    """Water ratio and cooking time by rice type."""
+    low = (rice or "white").lower()
+    key = next((name for name in _RICE if name in low), "white")
+    ratio, minutes, note = _RICE[key]
+    amount = _first_float(cups, 1.0) or 1.0
+    water = amount * float(ratio.split("to")[-1])
+    return (f"for {_num(round(amount, 2))} cups of {key} rice use {_num(round(water, 2))} cups of water, "
+            f"about {minutes} minutes, {note}")
+
+
+def pizza_dough(count: str = "4", ball_weight: str = "250") -> str:
+    """Flour, water, yeast and salt for a number of pizzas."""
+    try:
+        pizzas = max(1, int(_first_float(count, 4)))
+    except (TypeError, ValueError):
+        pizzas = 4
+    ball = _first_float(ball_weight, 250) or 250
+    total = pizzas * ball
+    flour = total / 1.67
+    water = flour * 0.62
+    salt = flour * 0.025
+    yeast = flour * 0.005
+    oil = flour * 0.02
+    return (f"for {pizzas} dough balls of {_num(round(ball))} grams, use {_num(round(flour))} grams of flour, "
+            f"{_num(round(water))} grams of water, {_num(round(salt, 1))} grams of salt, "
+            f"{_num(round(yeast, 1))} grams of yeast and {_num(round(oil, 1))} grams of oil")
+
+
+def brine_calculator(weight: str = "", style: str = "wet") -> str:
+    """Salt and water for wet or dry brining."""
+    kg = _n_kg(weight)
+    if not kg or kg <= 0:
+        return "Tell me the weight of the meat, like 2 kilos"
+    low = (style or "wet").lower()
+    if "dry" in low:
+        salt = kg * 15
+        return (f"for a dry brine, rub about {_num(round(salt))} grams of salt over {_num(round(kg, 1))} "
+                "kilos and leave it uncovered in the fridge")
+    water = kg
+    salt = (kg + water) * 50
+    sugar = salt * 0.4
+    return (f"for a wet brine, dissolve about {_num(round(salt))} grams of salt and "
+            f"{_num(round(sugar))} grams of sugar in {_num(round(water, 1))} liters of water for "
+            f"{_num(round(kg, 1))} kilos of meat")
+
+
+def _pan_area(text):
+    low = str(text or "").lower()
+    values = _floats(low)
+    if not values:
+        return None
+    if "round" in low or "cake" in low:
+        radius = values[0] / 2
+        return math.pi * radius * radius
+    if "loaf" in low:
+        if len(values) >= 2:
+            return values[0] * values[1]
+        return values[0] * values[0] * 0.6
+    if len(values) >= 2:
+        return values[0] * values[1]
+    return values[0] * values[0]
+
+
+def cake_pan(pan_from: str = "", pan_to: str = "") -> str:
+    """Convert a recipe between pan sizes."""
+    first = _pan_area(pan_from)
+    second = _pan_area(pan_to)
+    if not first or not second:
+        return "Tell me the two pans, like a 20 centimeter round pan and a 20 centimeter square pan"
+    factor = second / first
+    direction = "more" if factor > 1 else "less"
+    return (f"the new pan takes about {_num(round(factor, 2))} times the batter, so use "
+            f"{_num(round(abs(factor - 1) * 100))} percent {direction}, keep the temperature and start "
+            f"checking a little {'later' if factor > 1 else 'earlier'}")
+
+
+_SPICE_SUBS = {
+    "cumin": "ground coriander or chili powder, use a little less",
+    "coriander": "ground cumin or caraway",
+    "paprika": "cayenne mixed with a little sugar, or chili powder",
+    "cayenne": "hot paprika or a few drops of hot sauce",
+    "oregano": "marjoram or thyme",
+    "thyme": "oregano or savory",
+    "basil": "oregano or a little mint",
+    "rosemary": "thyme or savory",
+    "sage": "rosemary or poultry seasoning",
+    "parsley": "chervil or a little celery leaf",
+    "cilantro": "parsley with a squeeze of lime",
+    "dill": "fennel fronds or tarragon",
+    "bay leaf": "a pinch of thyme or oregano",
+    "cinnamon": "nutmeg or allspice, use half",
+    "nutmeg": "cinnamon or mace",
+    "ginger": "allspice or a little cinnamon",
+    "turmeric": "a pinch of saffron or curry powder",
+    "saffron": "turmeric for color, though the flavor is different",
+    "vanilla": "maple syrup or almond extract, use half",
+    "honey": "maple syrup or sugar with a little water",
+    "soy sauce": "tamari or coconut aminos",
+    "vinegar": "lemon juice in the same amount",
+    "lemon juice": "lime juice or white vinegar",
+    "garlic": "garlic powder, use a quarter of the amount",
+    "onion": "shallot or leek",
+    "chili powder": "paprika plus a pinch of cayenne",
+    "curry powder": "garam masala or a mix of turmeric, cumin and coriander",
+    "garam masala": "curry powder or a pinch of cinnamon and cumin",
+    "five spice": "a mix of cinnamon, cloves, fennel and pepper",
+    "worcestershire": "soy sauce with a little vinegar and sugar",
+}
+
+
+def spice_substitute(spice: str = "") -> str:
+    """A substitute for a spice or herb."""
+    key = " ".join(str(spice or "").lower().split())
+    if not key:
+        return "Tell me the spice, like cumin"
+    found = next((name for name in _SPICE_SUBS if key == name or key in name or name in key), None)
+    if not found:
+        return f"I do not know a substitute for {spice}"
+    return f"for {found}, use {_SPICE_SUBS[found]}"
+
+
+_FREEZER = {
+    "chicken": ("1 to 2 days", "9 to 12 months"),
+    "beef": ("3 to 5 days", "4 to 12 months"),
+    "pork": ("3 to 5 days", "4 to 6 months"),
+    "fish": ("1 to 2 days", "3 to 6 months"),
+    "shrimp": ("1 to 2 days", "3 to 6 months"),
+    "eggs": ("3 to 5 weeks", "not recommended in the shell"),
+    "milk": ("5 to 7 days", "3 months"),
+    "cheese": ("1 to 2 weeks", "2 to 3 months"),
+    "butter": ("1 to 2 months", "6 to 9 months"),
+    "bread": ("3 to 5 days", "2 to 3 months"),
+    "soup": ("3 to 4 days", "2 to 3 months"),
+    "stew": ("3 to 4 days", "2 to 3 months"),
+    "cooked rice": ("3 to 4 days", "1 month"),
+    "pasta": ("3 to 5 days", "1 to 2 months"),
+    "pizza": ("3 to 4 days", "1 to 2 months"),
+    "fruit": ("3 to 7 days", "8 to 12 months"),
+    "vegetables": ("3 to 7 days", "8 to 12 months"),
+    "berries": ("3 to 7 days", "8 to 12 months"),
+    "bananas": ("2 to 3 days", "2 to 3 months"),
+    "avocado": ("2 to 3 days", "not recommended"),
+    "mayonnaise": ("2 months", "not recommended"),
+    "yogurt": ("1 to 2 weeks", "1 to 2 months"),
+    "bacon": ("7 days", "1 month"),
+    "sausage": ("1 to 2 days", "1 to 2 months"),
+    "ham": ("3 to 5 days", "1 to 2 months"),
+    "turkey": ("1 to 2 days", "2 to 6 months"),
+    "tofu": ("3 to 5 days", "3 months"),
+    "nuts": ("3 to 6 months", "6 to 12 months"),
+    "flour": ("6 to 12 months", "6 to 12 months"),
+    "coffee": ("1 to 2 weeks", "6 months"),
+}
+
+
+def freezer_storage(food: str = "") -> str:
+    """How long a food keeps in the fridge and freezer."""
+    key = " ".join(str(food or "").lower().split())
+    if not key:
+        return "Tell me the food, like chicken"
+    found = next((name for name in _FREEZER if key == name or key in name or name in key), None)
+    if not found:
+        return f"I do not know storage times for {food}"
+    fridge, freezer = _FREEZER[found]
+    return f"{found} keeps {fridge} in the fridge and {freezer} in the freezer"
+
+
+# ---- health -----------------------------------------------------------------
+def a1c_convert(value: str = "", unit: str = "") -> str:
+    """Convert HbA1c between percent and mmol/mol, with estimated average glucose."""
+    number = _first_float(value)
+    if number is None:
+        return "Tell me the HbA1c value, like 5.7 percent or 39 mmol/mol"
+    low = f"{value} {unit}".lower()
+    if "mmol" in low or number > 20:
+        mmol = number
+        percent = mmol / 10.929 + 2.15
+    else:
+        percent = number
+        mmol = (percent - 2.15) * 10.929
+    average = 28.7 * percent - 46.7
+    return (f"an HbA1c of {_num(round(percent, 1))} percent is {_num(round(mmol))} mmol/mol, "
+            f"an estimated average glucose of about {_num(round(average))} milligrams per deciliter, "
+            f"or {_num(round(average / 18, 1))} millimoles per liter")
+
+
+def cholesterol_ratio(total: str = "", hdl: str = "") -> str:
+    """Total cholesterol to HDL ratio."""
+    total_value, hdl_value = _first_float(total), _first_float(hdl)
+    if not total_value or not hdl_value:
+        return "Tell me the total cholesterol and the HDL, like 200 and 50"
+    ratio = total_value / hdl_value
+    if ratio < 3.5:
+        label = "optimal"
+    elif ratio < 5:
+        label = "about average"
+    else:
+        label = "high"
+    return (f"a total of {_num(round(total_value))} with an HDL of {_num(round(hdl_value))} gives a ratio "
+            f"of {_num(round(ratio, 1))}, which is {label}")
+
+
+def ideal_weight(height: str = "", sex: str = "") -> str:
+    """Healthy weight range and a rough ideal weight for a height."""
+    cm = _n_cm(height)
+    if not cm or cm <= 0:
+        return "Tell me the height, like 175 centimeters"
+    metres = cm / 100
+    low = 18.5 * metres * metres
+    high = 24.9 * metres * metres
+    inches_over_five_feet = max(0.0, cm / 2.54 - 60)
+    male = "female" not in (sex or "").lower() and "woman" not in (sex or "").lower()
+    ideal = (50 if male else 45.5) + 2.3 * inches_over_five_feet
+    return (f"a healthy weight for {_num(round(cm))} centimeters is about {_num(round(low))} to "
+            f"{_num(round(high))} kilos, with a rough ideal of {_num(round(ideal))} kilos")
+
+
+def protein_target(weight: str = "", activity: str = "") -> str:
+    """Daily protein grams by weight and activity."""
+    kg = _n_kg(weight)
+    if not kg or kg <= 0:
+        return "Tell me the weight, like 70 kilos"
+    low = (activity or "").lower()
+    if "athlete" in low or "training" in low:
+        factor_low, factor_high = 1.6, 2.2
+    elif "active" in low or "gym" in low or "sport" in low:
+        factor_low, factor_high = 1.4, 2.0
+    elif "diet" in low or "lose" in low:
+        factor_low, factor_high = 1.6, 2.2
+    else:
+        factor_low, factor_high = 1.0, 1.6
+    return (f"aim for about {_num(round(kg * factor_low))} to {_num(round(kg * factor_high))} grams of "
+            f"protein a day at {_num(round(kg, 1))} kilos")
+
+
+def bac_estimate(drinks: str = "", weight: str = "", hours: str = "0", sex: str = "male") -> str:
+    """Rough blood alcohol estimate from standard drinks, weight and time."""
+    count = _first_float(drinks)
+    kg = _n_kg(weight)
+    if count is None or not kg or kg <= 0:
+        return "Tell me how many standard drinks and the body weight, like 3 drinks and 70 kilos"
+    elapsed = _first_float(hours, 0.0) or 0.0
+    female = "female" in (sex or "").lower() or "woman" in (sex or "").lower()
+    water = 0.55 if female else 0.68
+    grams = count * 14.0
+    bac = max(0.0, grams / (kg * 1000 * water) * 100 - 0.015 * elapsed)
+    if bac == 0:
+        return "that should be back to zero by now, but never drive if you feel affected"
+    if bac < 0.05:
+        level = "below the usual 0.05 limit"
+    elif bac < 0.08:
+        level = "around the usual 0.05 limit"
+    else:
+        level = "over the usual 0.08 limit"
+    return (f"roughly {_num(round(bac, 2))} percent blood alcohol, {level}. This is only an estimate, "
+            "never drive after drinking")
+
+
+# ---- travel and everyday ----------------------------------------------------
+_AIRPORTS = {
+    "PRG": ("Prague Vaclav Havel", "Prague", "Czech Republic"),
+    "BRQ": ("Brno Turany", "Brno", "Czech Republic"),
+    "VIE": ("Vienna International", "Vienna", "Austria"),
+    "BTS": ("Bratislava Milan Rastislav Stefanik", "Bratislava", "Slovakia"),
+    "BER": ("Berlin Brandenburg", "Berlin", "Germany"),
+    "MUC": ("Munich", "Munich", "Germany"),
+    "FRA": ("Frankfurt", "Frankfurt", "Germany"),
+    "DUS": ("Dusseldorf", "Dusseldorf", "Germany"),
+    "HAM": ("Hamburg", "Hamburg", "Germany"),
+    "CDG": ("Paris Charles de Gaulle", "Paris", "France"),
+    "ORY": ("Paris Orly", "Paris", "France"),
+    "LHR": ("London Heathrow", "London", "United Kingdom"),
+    "LGW": ("London Gatwick", "London", "United Kingdom"),
+    "STN": ("London Stansted", "London", "United Kingdom"),
+    "AMS": ("Amsterdam Schiphol", "Amsterdam", "Netherlands"),
+    "BRU": ("Brussels", "Brussels", "Belgium"),
+    "ZRH": ("Zurich", "Zurich", "Switzerland"),
+    "GVA": ("Geneva", "Geneva", "Switzerland"),
+    "MAD": ("Madrid Barajas", "Madrid", "Spain"),
+    "BCN": ("Barcelona El Prat", "Barcelona", "Spain"),
+    "PMI": ("Palma de Mallorca", "Palma", "Spain"),
+    "LIS": ("Lisbon Humberto Delgado", "Lisbon", "Portugal"),
+    "OPO": ("Porto Francisco Sa Carneiro", "Porto", "Portugal"),
+    "FCO": ("Rome Fiumicino", "Rome", "Italy"),
+    "MXP": ("Milan Malpensa", "Milan", "Italy"),
+    "VCE": ("Venice Marco Polo", "Venice", "Italy"),
+    "ATH": ("Athens Eleftherios Venizelos", "Athens", "Greece"),
+    "IST": ("Istanbul", "Istanbul", "Turkey"),
+    "WAW": ("Warsaw Chopin", "Warsaw", "Poland"),
+    "KRK": ("Krakow John Paul II", "Krakow", "Poland"),
+    "BUD": ("Budapest Ferenc Liszt", "Budapest", "Hungary"),
+    "OTP": ("Bucharest Henri Coanda", "Bucharest", "Romania"),
+    "SOF": ("Sofia", "Sofia", "Bulgaria"),
+    "ZAG": ("Zagreb", "Zagreb", "Croatia"),
+    "LJU": ("Ljubljana Joze Pucnik", "Ljubljana", "Slovenia"),
+    "CPH": ("Copenhagen", "Copenhagen", "Denmark"),
+    "ARN": ("Stockholm Arlanda", "Stockholm", "Sweden"),
+    "OSL": ("Oslo Gardermoen", "Oslo", "Norway"),
+    "HEL": ("Helsinki Vantaa", "Helsinki", "Finland"),
+    "DUB": ("Dublin", "Dublin", "Ireland"),
+    "EDI": ("Edinburgh", "Edinburgh", "United Kingdom"),
+    "JFK": ("New York John F. Kennedy", "New York", "United States"),
+    "EWR": ("Newark Liberty", "Newark", "United States"),
+    "LGA": ("New York LaGuardia", "New York", "United States"),
+    "LAX": ("Los Angeles", "Los Angeles", "United States"),
+    "SFO": ("San Francisco", "San Francisco", "United States"),
+    "ORD": ("Chicago O'Hare", "Chicago", "United States"),
+    "ATL": ("Atlanta Hartsfield-Jackson", "Atlanta", "United States"),
+    "MIA": ("Miami", "Miami", "United States"),
+    "BOS": ("Boston Logan", "Boston", "United States"),
+    "SEA": ("Seattle Tacoma", "Seattle", "United States"),
+    "DEN": ("Denver", "Denver", "United States"),
+    "YYZ": ("Toronto Pearson", "Toronto", "Canada"),
+    "YVR": ("Vancouver", "Vancouver", "Canada"),
+    "MEX": ("Mexico City Benito Juarez", "Mexico City", "Mexico"),
+    "GRU": ("Sao Paulo Guarulhos", "Sao Paulo", "Brazil"),
+    "EZE": ("Buenos Aires Ezeiza", "Buenos Aires", "Argentina"),
+    "DXB": ("Dubai", "Dubai", "United Arab Emirates"),
+    "DOH": ("Doha Hamad", "Doha", "Qatar"),
+    "DEL": ("Delhi Indira Gandhi", "Delhi", "India"),
+    "BOM": ("Mumbai Chhatrapati Shivaji", "Mumbai", "India"),
+    "SIN": ("Singapore Changi", "Singapore", "Singapore"),
+    "BKK": ("Bangkok Suvarnabhumi", "Bangkok", "Thailand"),
+    "HKG": ("Hong Kong", "Hong Kong", "China"),
+    "PEK": ("Beijing Capital", "Beijing", "China"),
+    "PVG": ("Shanghai Pudong", "Shanghai", "China"),
+    "NRT": ("Tokyo Narita", "Tokyo", "Japan"),
+    "HND": ("Tokyo Haneda", "Tokyo", "Japan"),
+    "KIX": ("Osaka Kansai", "Osaka", "Japan"),
+    "ICN": ("Seoul Incheon", "Seoul", "South Korea"),
+    "SYD": ("Sydney", "Sydney", "Australia"),
+    "MEL": ("Melbourne", "Melbourne", "Australia"),
+    "AKL": ("Auckland", "Auckland", "New Zealand"),
+    "JNB": ("Johannesburg O. R. Tambo", "Johannesburg", "South Africa"),
+    "CPT": ("Cape Town", "Cape Town", "South Africa"),
+    "CAI": ("Cairo", "Cairo", "Egypt"),
+    "CMN": ("Casablanca Mohammed V", "Casablanca", "Morocco"),
+    "TLV": ("Tel Aviv Ben Gurion", "Tel Aviv", "Israel"),
+}
+
+
+def airport_lookup(query: str = "") -> str:
+    """Airport name and city from an IATA code or city."""
+    text = " ".join(str(query or "").upper().split())
+    if not text:
+        return "Tell me the airport code or city, like PRG or Prague"
+    if text in _AIRPORTS:
+        name, city, country = _AIRPORTS[text]
+        return f"{text} is {name} in {city}, {country}"
+    found = [(code, data) for code, data in _AIRPORTS.items()
+             if text in data[1].upper() or text in data[0].upper()]
+    if not found:
+        return f"I do not know an airport called {query}"
+    code, (name, city, country) = found[0]
+    more = f", and {len(found) - 1} more" if len(found) > 1 else ""
+    return f"{code} is {name} in {city}, {country}{more}"
+
+
+_EMERGENCY = {
+    "united states": "911", "usa": "911", "canada": "911", "mexico": "911",
+    "united kingdom": "999 or 112", "uk": "999 or 112", "ireland": "112 or 999",
+    "czech republic": "112", "czechia": "112", "slovakia": "112", "poland": "112",
+    "germany": "112", "austria": "112", "switzerland": "112", "france": "112",
+    "spain": "112", "portugal": "112", "italy": "112", "netherlands": "112",
+    "belgium": "112", "denmark": "112", "sweden": "112", "norway": "112",
+    "finland": "112", "greece": "112", "hungary": "112", "romania": "112",
+    "bulgaria": "112", "croatia": "112", "slovenia": "112", "australia": "000",
+    "new zealand": "111", "japan": "110 for police, 119 for fire and ambulance",
+    "south korea": "112 for police, 119 for fire and ambulance",
+    "china": "110 for police, 120 for ambulance", "india": "112",
+    "brazil": "190 for police, 192 for ambulance", "argentina": "911",
+    "south africa": "10111 for police, 10177 for ambulance",
+    "united arab emirates": "999 for police, 998 for ambulance",
+    "israel": "100 for police, 101 for ambulance", "turkey": "112",
+}
+
+
+def emergency_numbers(country: str = "") -> str:
+    """The emergency phone number for a country."""
+    key = " ".join(str(country or "").lower().split())
+    if not key:
+        return "Tell me the country, or remember that 112 works in most of Europe"
+    found = next((name for name in _EMERGENCY if key == name or key in name or name in key), None)
+    if not found:
+        return f"I do not know the emergency number for {country}, but 112 works in most of Europe"
+    return f"in {found.title()} the emergency number is {_EMERGENCY[found]}"
+
+
+_SHOES = [
+    (36, 4.0, 5.5, 3.0, 22.5),
+    (37, 5.0, 6.5, 4.0, 23.5),
+    (38, 6.0, 7.5, 5.0, 24.5),
+    (39, 7.0, 8.5, 6.0, 25.0),
+    (40, 7.5, 9.0, 6.5, 25.5),
+    (41, 8.0, 9.5, 7.0, 26.0),
+    (42, 9.0, 10.5, 8.0, 27.0),
+    (43, 10.0, 11.5, 9.0, 27.5),
+    (44, 11.0, 12.5, 10.0, 28.0),
+    (45, 12.0, 13.5, 11.0, 29.0),
+    (46, 13.0, 14.5, 12.0, 29.5),
+    (47, 14.0, 15.5, 13.0, 30.5),
+    (48, 15.0, 16.5, 14.0, 31.0),
+]
+
+
+def shoe_size(size: str = "", system: str = "") -> str:
+    """Convert a shoe size between EU, US, UK and centimetres."""
+    value = _first_float(size)
+    if value is None:
+        return "Tell me the size, like EU 42 or US 9"
+    low = (system or "").lower()
+    if "eu" in low or "europe" in low:
+        column = 0
+    elif "women" in low or "woman" in low:
+        column = 2
+    elif "uk" in low or "brit" in low:
+        column = 3
+    elif "cm" in low or "centimet" in low:
+        column = 4
+    elif "us" in low or "americ" in low:
+        column = 1
+    else:
+        column = 0 if value >= 35 else 4 if value >= 20 else 1
+    row = min(_SHOES, key=lambda item: abs(item[column] - value))
+    return (f"EU {row[0]} is US men {_num(row[1])}, US women {_num(row[2])}, UK {_num(row[3])}, "
+            f"for a foot about {_num(row[4])} centimeters long")
+
+
+_RINGS = [
+    (4, "H", 47, 46.8, 14.9),
+    (5, "J", 49, 49.3, 15.7),
+    (6, "L", 51, 51.9, 16.5),
+    (7, "N", 54, 54.4, 17.3),
+    (8, "P", 56, 57.0, 18.1),
+    (9, "R", 58, 59.5, 18.9),
+    (10, "T", 60, 62.1, 19.8),
+    (11, "V", 62, 64.6, 20.6),
+    (12, "X", 65, 67.2, 21.4),
+    (13, "Z", 67, 69.7, 22.2),
+]
+
+
+def ring_size(size: str = "", system: str = "") -> str:
+    """Convert a ring size between US, UK, EU, circumference and diameter."""
+    value = _first_float(size)
+    if value is None:
+        return "Tell me the ring size, like US 7 or 54 millimeters around"
+    low = (system or "").lower()
+    if "diameter" in low:
+        column = 4
+    elif "circum" in low or "around" in low or "mm" in low:
+        column = 3
+    elif "uk" in low or "brit" in low:
+        column = 1
+    elif "eu" in low or "europe" in low:
+        column = 2
+    elif "us" in low or "americ" in low:
+        column = 0
+    else:
+        column = 0 if value <= 15 else 2
+    if column == 1:
+        row = min(_RINGS, key=lambda item: abs(ord(item[1]) - ord(str(size).strip().upper()[:1] or "A")))
+    else:
+        row = min(_RINGS, key=lambda item: abs(item[column] - value))
+    return (f"US {row[0]} is UK {row[1]}, EU {row[2]}, {_num(row[3])} millimeters around and "
+            f"{_num(row[4])} millimeters across")
+
+
+def meeting_time_overlap(from_place: str = "", to_place: str = "",
+                         start: str = "9", end: str = "17") -> str:
+    """Best overlapping working hours between two places."""
+    first = _geocode(from_place) if (from_place or "").strip() else None
+    second = _geocode(to_place)
+    if (from_place or "").strip() and not first:
+        return _no_place(from_place)
+    if not second:
+        return _no_place(to_place)
+    offset_first = time.localtime().tm_gmtoff if first is None else _utc_offset(first)
+    offset_second = _utc_offset(second)
+    if offset_first is None or offset_second is None:
+        return "Sorry, I could not get the time zones"
+    try:
+        start_hour = max(0, min(23, int(_first_float(start, 9))))
+        end_hour = max(start_hour + 1, min(24, int(_first_float(end, 17))))
+    except (TypeError, ValueError):
+        start_hour, end_hour = 9, 17
+    first_start = start_hour * 60 - offset_first / 60
+    first_end = end_hour * 60 - offset_first / 60
+    second_start = start_hour * 60 - offset_second / 60
+    second_end = end_hour * 60 - offset_second / 60
+    overlap_start = max(first_start, second_start)
+    overlap_end = min(first_end, second_end)
+    if overlap_start >= overlap_end:
+        return (f"there is no overlap between {start_hour}:00 and {end_hour}:00 in "
+                f"{'here' if first is None else first['name']} and {second['name']}")
+
+    def local(minutes, offset):
+        total = int(round(minutes + offset / 60)) % 1440
+        return _clock(total // 60, total % 60)
+
+    return (f"the best overlap is {local(overlap_start, offset_first)} to "
+            f"{local(overlap_end, offset_first)} {'here' if first is None else 'in ' + first['name']}, "
+            f"which is {local(overlap_start, offset_second)} to {local(overlap_end, offset_second)} "
+            f"in {second['name']}")
+
+
+# ---- tech and internet ------------------------------------------------------
+def _dns_values(answers, kind):
+    """Clean DNS answer data for speech."""
+    values = []
+    for answer in answers or []:
+        raw = str(answer.get("data", "")).strip().strip('"')
+        if not raw:
+            continue
+        if kind == "MX":
+            parts = raw.split()
+            host = parts[-1].rstrip(".") if parts else ""
+            if not host or host == ".":
+                continue
+            raw = f"{parts[0]} {host}" if len(parts) > 1 else host
+        elif kind in ("NS", "CNAME"):
+            raw = raw.rstrip(".")
+        values.append(raw)
+    return values
+
+
+def dns_records(domain: str = "", record_type: str = "") -> str:
+    """MX, TXT and NS records for a domain."""
+    name = re.sub(r"^https?://", "", str(domain or "").strip()).split("/")[0]
+    if not name:
+        return "Tell me the domain, like example.com"
+    wanted = (record_type or "").upper().strip()
+    types = [wanted] if wanted in ("MX", "TXT", "NS", "A", "AAAA", "CNAME") else ["MX", "TXT", "NS"]
+    parts = []
+    for kind in types:
+        data = _get("https://cloudflare-dns.com/dns-query",
+                    {"name": name, "type": kind}, headers={"Accept": "application/dns-json"})
+        values = _dns_values((data or {}).get("Answer") or [], kind)
+        if values:
+            shown = values[:4]
+            parts.append(f"{kind}: " + ", ".join(shown)
+                         + (f", and {len(values) - 4} more" if len(values) > 4 else ""))
+    if not parts:
+        return f"I found no DNS records for {name}"
+    return f"for {name}, " + "; ".join(parts)
+
+
+def email_validator(email: str = "") -> str:
+    """Check the syntax and mail server of an email address."""
+    address = str(email or "").strip()
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", address):
+        return "that does not look like a valid email address"
+    domain = address.rsplit("@", 1)[1]
+    data = _get("https://cloudflare-dns.com/dns-query",
+                {"name": domain, "type": "MX"}, headers={"Accept": "application/dns-json"})
+    servers = [value.split()[-1] for value in _dns_values((data or {}).get("Answer") or [], "MX")]
+    if servers:
+        return f"{address} looks valid, and {domain} accepts mail through {servers[0]}"
+    return f"{address} has valid syntax, but I found no mail server for {domain}"
+
+
+def redirect_chain(url: str = "") -> str:
+    """Where a web address redirects, and the final address."""
+    target = _n_safe_url(url)
+    if not target:
+        return "Tell me a public web address, like example.com"
+    try:
+        response = _req("GET", target, allow_redirects=True, timeout=10, stream=True)
+        history = response.history
+        final = response.url
+        status = response.status_code
+        response.close()
+    except requests.RequestException:
+        return "Sorry, I could not reach that address"
+    if not history:
+        return f"{target} does not redirect, it answers with status {status}"
+    return (f"{target} redirects {len(history)} {'time' if len(history) == 1 else 'times'} "
+            f"and ends at {final} with status {status}")
+
+
+_COMMON_PASSWORDS = {
+    "password", "123456", "123456789", "qwerty", "abc123", "letmein", "monkey", "dragon",
+    "111111", "iloveyou", "admin", "welcome", "football", "master", "sunshine", "princess",
+    "login", "passw0rd", "starwars", "hello",
+}
+
+
+def password_strength(password: str = "") -> str:
+    """Estimate password strength and crack time."""
+    secret = str(password or "")
+    if not secret:
+        return "Tell me the password to check"
+    if secret.lower() in _COMMON_PASSWORDS:
+        return "that is one of the most common passwords, change it now"
+    charset = (26 * bool(re.search(r"[a-z]", secret)) + 26 * bool(re.search(r"[A-Z]", secret))
+               + 10 * bool(re.search(r"\d", secret)) + 33 * bool(re.search(r"[^A-Za-z0-9]", secret)))
+    bits = len(secret) * math.log2(max(2, charset))
+    seconds = float("inf") if bits > 128 else 2 ** bits / 1e10
+    if seconds < 60:
+        time_text = "less than a minute"
+    elif seconds < 3600:
+        time_text = f"{_num(round(seconds / 60))} minutes"
+    elif seconds < 86400:
+        time_text = f"{_num(round(seconds / 3600))} hours"
+    elif seconds < 31536000:
+        time_text = f"{_num(round(seconds / 86400))} days"
+    elif seconds < 31536000 * 1000:
+        time_text = f"{_num(round(seconds / 31536000))} years"
+    else:
+        time_text = "centuries"
+    if bits < 40:
+        label = "weak"
+    elif bits < 60:
+        label = "fair"
+    elif bits < 80:
+        label = "strong"
+    else:
+        label = "very strong"
+    return (f"that is {label}, about {_num(round(bits))} bits of entropy, which would take about "
+            f"{time_text} to crack at a billion guesses a second. Nothing left this device")
+
+
+_CRON_MONTHS = {name: i + 1 for i, name in enumerate(
+    ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"))}
+_CRON_DAYS = {name: i for i, name in enumerate(("sun", "mon", "tue", "wed", "thu", "fri", "sat"))}
+
+
+def _cron_values(field: str, low: int, high: int, names: dict = None):
+    values = set()
+    for part in str(field or "*").lower().split(","):
+        part = part.strip()
+        if not part:
+            continue
+        step = 1
+        if "/" in part:
+            part, step_text = part.split("/", 1)
+            try:
+                step = max(1, int(step_text))
+            except ValueError:
+                step = 1
+        if part in ("*", "?"):
+            start, end = low, high
+        elif "-" in part:
+            left, right = part.split("-", 1)
+            start = names.get(left) if names else None
+            if start is None:
+                try:
+                    start = int(left)
+                except ValueError:
+                    continue
+            end = names.get(right) if names else None
+            if end is None:
+                try:
+                    end = int(right)
+                except ValueError:
+                    continue
+        else:
+            value = names.get(part) if names else None
+            if value is None:
+                try:
+                    value = int(part)
+                except ValueError:
+                    continue
+            start = end = value
+        if start < low or end > high or start > end:
+            continue
+        values.update(range(start, end + 1, step))
+    return sorted(values) or list(range(low, high + 1))
+
+
+def cron_next(expression: str = "", count: str = "3") -> str:
+    """The next run times of a five-field cron expression."""
+    fields = str(expression or "").split()
+    if len(fields) != 5:
+        return "Tell me a five field cron expression, like 0 7 * * 1"
+    minutes = _cron_values(fields[0], 0, 59)
+    hours = _cron_values(fields[1], 0, 23)
+    days = _cron_values(fields[2], 1, 31)
+    months = _cron_values(fields[3], 1, 12, _CRON_MONTHS)
+    weekdays = _cron_values(fields[4], 0, 7, _CRON_DAYS)
+    if 7 in weekdays:
+        weekdays = sorted({0 if day == 7 else day for day in weekdays})
+    weekday_numbers = {(day - 1) % 7 for day in weekdays}
+    dom_restricted = fields[2] not in ("*", "?")
+    dow_restricted = fields[4] not in ("*", "?")
+    try:
+        wanted = max(1, min(10, int(_first_float(count, 3))))
+    except (TypeError, ValueError):
+        wanted = 3
+    current = datetime.now().replace(second=0, microsecond=0) + timedelta(minutes=1)
+    limit = current + timedelta(days=366)
+    found = []
+    while current <= limit and len(found) < wanted:
+        if current.month in months and current.hour in hours and current.minute in minutes:
+            day_ok = current.day in days
+            weekday_ok = current.weekday() in weekday_numbers
+            date_ok = (day_ok or weekday_ok) if (dom_restricted and dow_restricted) else (day_ok and weekday_ok)
+            if date_ok:
+                found.append(current)
+                current += timedelta(minutes=1)
+                continue
+        current += timedelta(minutes=1)
+    if not found:
+        return "I could not find a run time in the next year for that expression"
+    return "next runs: " + ", ".join(
+        f"{_fmt_date(moment, False)} at {_clock(moment.hour, moment.minute)}" for moment in found)
+
+
+def mime_type(name: str = "") -> str:
+    """MIME type for a file extension, or extensions for a MIME type."""
+    text = str(name or "").strip()
+    if not text:
+        return "Tell me a file extension or MIME type, like .pdf or application/json"
+    if "/" in text:
+        extensions = mimetypes.guess_all_extensions(text)
+        if not extensions:
+            return f"I do not know the MIME type {text}"
+        return f"{text} usually uses {', '.join(extensions[:5])}"
+    extension = text if text.startswith(".") else "." + text
+    kind, encoding = mimetypes.guess_type("file" + extension)
+    if not kind:
+        return f"I do not know a MIME type for {text}"
+    return f"{text} is usually {kind}" + (f", {encoding} encoded" if encoding else "")
+
+
+def chmod_calculator(value: str = "") -> str:
+    """Convert between octal and symbolic file permissions."""
+    text = str(value or "").strip().lower()
+    if not text:
+        return "Tell me permissions, like 755 or rwxr-xr-x"
+    if re.fullmatch(r"[0-7]{3,4}", text):
+        digits = text[-3:]
+        parts = []
+        for digit in digits:
+            number = int(digit)
+            parts.append(("r" if number & 4 else "-") + ("w" if number & 2 else "-")
+                         + ("x" if number & 1 else "-"))
+        special = f", with special bits {text[0]}" if len(text) == 4 and text[0] != "0" else ""
+        return f"{text} is {''.join(parts)}{special}"
+    symbolic = text.replace(" ", "")
+    if re.fullmatch(r"[rwx-]{9}", symbolic):
+        octal = ""
+        for index in range(0, 9, 3):
+            chunk = symbolic[index:index + 3]
+            octal += str((4 if chunk[0] == "r" else 0) + (2 if chunk[1] == "w" else 0)
+                         + (1 if chunk[2] == "x" else 0))
+        return f"{symbolic} is {octal}"
+    return "Tell me permissions, like 755 or rwxr-xr-x"
+
+
+def user_agent_parse(user_agent: str = "") -> str:
+    """Browser and operating system from a user agent string."""
+    text = str(user_agent or "")
+    if not text:
+        return "Tell me the user agent string"
+    browser = "an unknown browser"
+    for pattern, name in ((r"Edg/([\d.]+)", "Edge"), (r"OPR/([\d.]+)", "Opera"),
+                          (r"Chrome/([\d.]+)", "Chrome"), (r"Firefox/([\d.]+)", "Firefox"),
+                          (r"Version/([\d.]+).*Safari", "Safari")):
+        match = re.search(pattern, text)
+        if match:
+            browser = f"{name} {match.group(1).split('.')[0]}"
+            break
+    system = "an unknown system"
+    if "Windows NT 10" in text:
+        system = "Windows 10 or 11"
+    elif "Windows NT 6.3" in text:
+        system = "Windows 8.1"
+    elif "Windows" in text:
+        system = "Windows"
+    elif "Android" in text:
+        version = re.search(r"Android ([\d.]+)", text)
+        system = f"Android {version.group(1)}" if version else "Android"
+    elif "iPhone" in text or "iPad" in text:
+        version = re.search(r"OS ([\d_]+)", text)
+        system = "iOS " + version.group(1).replace("_", ".") if version else "iOS"
+    elif "Mac OS X" in text:
+        system = "macOS"
+    elif "Linux" in text:
+        system = "Linux"
+    return f"{browser} on {system}"
+
+
+def xml_format(text: str = "") -> str:
+    """Check whether XML is valid and describe it."""
+    raw = str(text or "").strip()
+    if not raw:
+        return "Tell me the XML to check"
+    try:
+        root = ElementTree.fromstring(raw)
+    except ElementTree.ParseError as exc:
+        return f"that is not valid XML: {exc}"
+    elements = list(root.iter())
+    return f"valid XML with root {root.tag} and {len(elements)} elements"
+
+
+# ---- text and writing -------------------------------------------------------
+def _syllables(word: str) -> int:
+    word = re.sub(r"[^a-z]", "", word.lower())
+    if not word:
+        return 0
+    count = len(re.findall(r"[aeiouy]+", word))
+    if word.endswith("e") and count > 1 and not word.endswith(("le", "ee")):
+        count -= 1
+    return max(1, count)
+
+
+def readability_score(text: str = "") -> str:
+    """Reading ease and grade level of a text."""
+    raw = str(text or "").strip()
+    if not raw:
+        return "Tell me the text to check"
+    words = re.findall(r"[A-Za-z']+", raw)
+    sentences = max(1, len(re.findall(r"[.!?]+", raw)))
+    if not words:
+        return "I found no words in that text"
+    syllables = sum(_syllables(word) for word in words)
+    ease = 206.835 - 1.015 * (len(words) / sentences) - 84.6 * (syllables / len(words))
+    grade = 0.39 * (len(words) / sentences) + 11.8 * (syllables / len(words)) - 15.59
+    ease = max(0, min(100, ease))
+    label = ("very easy" if ease >= 80 else "easy" if ease >= 60 else
+             "fairly hard" if ease >= 40 else "hard" if ease >= 20 else "very hard")
+    return (f"reading ease {_num(round(ease))} out of 100, {label}, about grade "
+            f"{_num(round(max(1, grade)))}, {_num(len(words))} words in {_num(sentences)} sentences")
+
+
+def slugify(text: str = "") -> str:
+    """A URL-friendly slug from a title."""
+    raw = str(text or "").strip()
+    if not raw:
+        return "Tell me the title to turn into a slug"
+    normalized = unicodedata.normalize("NFKD", raw).encode("ascii", "ignore").decode("ascii")
+    slug = re.sub(r"[^a-z0-9]+", "-", normalized.lower()).strip("-")
+    return slug or "nothing usable"
+
+
+def anonymize_text(text: str = "") -> str:
+    """Redact emails, phone numbers and links from a text."""
+    raw = str(text or "")
+    if not raw.strip():
+        return "Tell me the text to redact"
+    count = 0
+
+    def redact(pattern, label, value):
+        nonlocal count
+
+        def replace(_match):
+            nonlocal count
+            count += 1
+            return label
+
+        return re.sub(pattern, replace, value)
+
+    result = redact(r"[\w.+-]+@[\w-]+\.[\w.-]+", "[email]", raw)
+    result = redact(r"https?://\S+|www\.\S+", "[link]", result)
+    result = redact(r"\+?\d[\d\s().-]{6,}\d", "[phone]", result)
+    return f"{result} ({count} items redacted)" if count else "I found nothing to redact"
+
+
+def extract_entities(text: str = "") -> str:
+    """Pull emails, links, phone numbers and dates from a text."""
+    raw = str(text or "")
+    if not raw.strip():
+        return "Tell me the text to search"
+    emails = sorted(set(re.findall(r"[\w.+-]+@[\w-]+\.[\w.-]+", raw)))
+    links = sorted({value.rstrip(".,;:!?)]}") for value in re.findall(r"https?://\S+|www\.\S+", raw)})
+    phones = sorted(set(re.findall(r"\+?\d[\d\s().-]{6,}\d", raw)))
+    dates = sorted(set(re.findall(
+        r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b|"
+        r"\b(?:January|February|March|April|May|June|July|August|September|October|November|December)"
+        r"\s+\d{1,2}\b", raw, re.IGNORECASE)))
+    parts = []
+    if emails:
+        parts.append("emails: " + ", ".join(emails[:3]))
+    if links:
+        parts.append("links: " + ", ".join(links[:3]))
+    if phones:
+        parts.append("phone numbers: " + ", ".join(phones[:3]))
+    if dates:
+        parts.append("dates: " + ", ".join(dates[:3]))
+    return "; ".join(parts) if parts else "I found no emails, links, phone numbers or dates"
+
+
+# ---- fun --------------------------------------------------------------------
+_RIDDLES = [
+    ("What has keys but cannot open locks?", "a piano"),
+    ("What has hands but cannot clap?", "a clock"),
+    ("What has a head and a tail but no body?", "a coin"),
+    ("What gets wetter the more it dries?", "a towel"),
+    ("What has many teeth but cannot bite?", "a comb"),
+    ("What has one eye but cannot see?", "a needle"),
+    ("What goes up but never comes down?", "your age"),
+    ("What has a neck but no head?", "a bottle"),
+    ("What has cities but no houses, forests but no trees, and water but no fish?", "a map"),
+    ("What can travel around the world while staying in a corner?", "a stamp"),
+    ("What is full of holes but still holds water?", "a sponge"),
+    ("What belongs to you but other people use it more than you do?", "your name"),
+    ("What has a bottom at the top?", "your legs"),
+    ("What has four wheels and flies?", "a garbage truck"),
+    ("What building has the most stories?", "a library"),
+]
+_LAST_RIDDLE = None
+
+
+def riddle(action: str = "ask") -> str:
+    """Ask a riddle, or reveal the answer to the last one."""
+    global _LAST_RIDDLE
+    if "answer" in (action or "").lower() or "solution" in (action or "").lower():
+        if not _LAST_RIDDLE:
+            return "I have not asked a riddle yet"
+        return f"the answer is {_LAST_RIDDLE[1]}"
+    _LAST_RIDDLE = random.choice(_RIDDLES)
+    return _LAST_RIDDLE[0]
+
+
+_WOULD_YOU = [
+    ("be able to fly", "be able to turn invisible"),
+    ("always be ten minutes late", "always be twenty minutes early"),
+    ("have a pet dragon", "have a pet unicorn"),
+    ("know every language", "play every instrument"),
+    ("live by the sea", "live in the mountains"),
+    ("never need sleep", "never need food"),
+    ("travel to the past", "travel to the future"),
+    ("have unlimited books", "have unlimited music"),
+    ("be the funniest person in the room", "be the smartest person in the room"),
+    ("have a house with a pool", "have a house with a huge garden"),
+    ("only eat sweet food", "only eat salty food"),
+    ("always have to sing instead of speak", "always have to dance instead of walk"),
+]
+
+
+def would_you_rather() -> str:
+    """A random would-you-rather question."""
+    first, second = random.choice(_WOULD_YOU)
+    return f"would you rather {first} or {second}?"
+
+
+_STORY_STARTERS = [
+    "The last train was empty, except for one passenger who knew your name.",
+    "You found a door in your house that was not there yesterday.",
+    "The town clock stopped at exactly midnight, and nobody noticed but you.",
+    "A letter arrived with your handwriting on the envelope, dated next year.",
+    "The cat brought home a key instead of a mouse.",
+    "Every mirror in the hotel showed the room as it was fifty years ago.",
+    "You woke up with a map drawn on your arm and no memory of the night before.",
+    "The library book had notes in the margin that answered your question.",
+    "A stranger left a suitcase on your doorstep with a note that said, do not open until Sunday.",
+    "The radio played a song that had not been written yet.",
+    "You inherited a lighthouse, and the first night the light turned on by itself.",
+    "The elevator stopped at a floor that was not on the panel.",
+    "Your phone rang from your own number.",
+    "The garden grew a plant nobody had planted, and it was already in bloom.",
+    "A bird started repeating the last thing you said before you forgot it.",
+]
+
+
+def story_starter() -> str:
+    """A creative writing prompt."""
+    return random.choice(_STORY_STARTERS)
+
+
+# ---- music and school -------------------------------------------------------
+_NOTE_SHARP = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+_NOTE_FLAT = {"Db": "C#", "Eb": "D#", "Gb": "F#", "Ab": "G#", "Bb": "A#", "Cb": "B", "Fb": "E"}
+_CHORD_RE = re.compile(
+    r"\b([A-G])([#b]?)"
+    r"((?:maj|min|m|dim|aug|sus|add|M)?(?:7|9|11|13|6|5|4|2)?(?:sus[24])?(?:\([^)]*\))?)?"
+    r"(?:/([A-G])([#b]?))?\b"
+)
+
+
+def _shift_note(note: str, semitones: int) -> str:
+    letter = note[0].upper()
+    accidental = note[1:2]
+    base = _NOTE_FLAT.get(letter + accidental, letter + accidental)
+    return _NOTE_SHARP[(_NOTE_SHARP.index(base) + semitones) % 12]
+
+
+def transpose_chords(progression: str = "", semitones: str = "2") -> str:
+    """Transpose a chord progression by a number of semitones."""
+    text = str(progression or "").strip()
+    if not text:
+        return "Tell me the chords, like C G Am F"
+    try:
+        shift = int(_first_float(semitones, 2))
+    except (TypeError, ValueError):
+        shift = 2
+
+    def replace(match):
+        root = match.group(1) + (match.group(2) or "")
+        quality = match.group(3) or ""
+        bass = match.group(4)
+        bass_accidental = match.group(5) or ""
+        result = _shift_note(root, shift) + quality
+        if bass:
+            result += "/" + _shift_note(bass + bass_accidental, shift)
+        return result
+
+    return _CHORD_RE.sub(replace, text)
+
+
+_GRADE_POINTS = {
+    "A+": 4.0, "A": 4.0, "A-": 3.7, "B+": 3.3, "B": 3.0, "B-": 2.7,
+    "C+": 2.3, "C": 2.0, "C-": 1.7, "D+": 1.3, "D": 1.0, "D-": 0.7, "F": 0.0,
+}
+
+
+def gpa_calculator(grades: str = "", credits: str = "") -> str:
+    """GPA from letter grades and optional credits."""
+    found = re.findall(r"\b([A-F])([+-]?)(?=[\s,;]|$)", str(grades or "").upper())
+    if not found:
+        return "Tell me the grades, like A, B+ and C"
+    points = [_GRADE_POINTS.get(letter + sign, 0.0) for letter, sign in found]
+    credit_values = _floats(credits)
+    if credit_values and len(credit_values) >= len(points):
+        weights = credit_values[:len(points)]
+        gpa = sum(point * weight for point, weight in zip(points, weights)) / sum(weights)
+        return f"your weighted GPA is {_num(round(gpa, 2))} over {_num(len(points))} grades"
+    gpa = sum(points) / len(points)
+    return f"your GPA is {_num(round(gpa, 2))} over {_num(len(points))} grades"
+
+
 # ---- specs: how each tool is described to the model ------------------------
 _MORE_SPECS5 = [
     _tool("remember_fact", "Remember any fact the user tells you so it can be recalled later. Use for 'remember that my passport is in the blue drawer', "
@@ -9624,6 +11212,208 @@ _MORE_SPECS6 = [
 ]
 _EXTRA_SPECS.extend(_MORE_SPECS6)
 
+# ---- specs for the newest fifty more tools (batch 3) ------------------------
+_MORE_SPECS7 = [
+    # weather and outdoors
+    _tool("snow_report", "Expected snowfall and snow depth for today or tomorrow. Use for 'will it snow today', "
+          "'how much snow is coming tomorrow', 'is there snow on the ground in Prague'.",
+          {"location": _text("The place, e.g. 'Prague'. Leave empty for the home city."),
+           "day": _text("'today' normally, or 'tomorrow'.")}),
+    _tool("driving_conditions", "Visibility, rain, wind and ice risk on the roads for the next hours. Use for "
+          "'how are the roads', 'is it foggy for driving', 'driving conditions to work'.",
+          {"location": _text("The place, e.g. 'Brno'. Leave empty for the home city."),
+           "hours": _text("How many hours ahead, e.g. '6'. Up to twelve.")}),
+    _tool("surf_report", "Wave height, period, direction and sea temperature. Use for 'how are the waves', "
+          "'surf report for Biarritz', 'is the sea warm in Lisbon'.",
+          {"location": _text("The coastal place, e.g. 'Biarritz'. Leave empty for the home city.")}),
+    _tool("frost_risk", "Overnight low and whether frost is likely. Use for 'will it freeze tonight', "
+          "'is there frost tonight', 'should I cover the plants'.",
+          {"location": _text("The place, e.g. 'Prague'. Leave empty for the home city.")}),
+    _tool("plant_water", "Whether the garden needs watering from recent and forecast rain. Use for "
+          "'do I need to water the garden', 'is the lawn dry', 'watering advice for this week'.",
+          {"location": _text("The place, e.g. 'Prague'. Leave empty for the home city.")}),
+    _tool("laundry_drying", "Whether laundry will dry outside today. Use for 'can I hang laundry outside', "
+          "'will the washing dry today', 'is it a good drying day'.",
+          {"location": _text("The place, e.g. 'Prague'. Leave empty for the home city.")}),
+    _tool("stargazing_conditions", "Cloud cover, moon brightness and the dark window for stargazing tonight. Use for "
+          "'is it a good night for stargazing', 'will the sky be clear tonight', 'can I see stars tonight'.",
+          {"location": _text("The place, e.g. 'Prague'. Leave empty for the home city.")}),
+    _tool("constellation_info", "Facts, brightest star and best months for a constellation. Use for "
+          "'tell me about Orion', 'when can I see Cassiopeia', 'what is the brightest star in Lyra'.",
+          {"name": _text("The constellation, e.g. 'Orion'.")}, ["name"]),
+    # home and garden
+    _tool("wallpaper_calculator", "How many rolls of wallpaper a room needs, with pattern repeat and openings. Use for "
+          "'how much wallpaper for a 4 by 5 meter room', 'wallpaper rolls for a room 2.6 meters high'.",
+          {"room": _text("The room size, e.g. '4 by 5 meters'."),
+           "height": _text("Wall height, e.g. '2.6 meters'. Default two and a half."),
+           "openings": _text("Total area of doors and windows, e.g. '4 square meters'. Optional."),
+           "roll": _text("Roll size, e.g. '0.53 by 10 meters'. Optional."),
+           "repeat": _text("Pattern repeat, e.g. '30 centimeters'. Optional.")}, ["room"]),
+    _tool("board_foot", "Board feet and cost from lumber dimensions. Use for 'how many board feet in ten 2 by 4s eight feet long', "
+          "'price of this lumber per board foot'.",
+          {"thickness": _text("Thickness, e.g. '2 inches'."),
+           "width": _text("Width, e.g. '4 inches'."),
+           "length": _text("Length, e.g. '8 feet'."),
+           "quantity": _text("How many pieces, e.g. '10'. Default one."),
+           "price": _text("Optional price per board foot, e.g. '12'.")}, ["thickness", "width", "length"]),
+    _tool("roof_pitch", "Pitch ratio, angle and slope from a roof pitch. Use for 'what angle is a 6/12 roof', "
+          "'convert 30 degrees to roof pitch', 'roof slope multiplier'.",
+          {"pitch": _text("The pitch, e.g. '6/12' or '30 degrees'.")}, ["pitch"]),
+    _tool("stair_calculator", "Risers, riser height and tread depth for a staircase. Use for 'how many steps for a 2.7 meter rise', "
+          "'stair dimensions for a 2.5 meter floor height'.",
+          {"total_rise": _text("The total rise, e.g. '2.7 meters'."),
+           "tread": _text("Optional tread depth, e.g. '25 centimeters'.")}, ["total_rise"]),
+    _tool("mulch_calculator", "Mulch or soil volume and bags for a bed. Use for 'how much mulch for a 4 by 5 meter bed', "
+          "'soil for 20 square meters 5 centimeters deep'.",
+          {"area": _text("The bed area, e.g. '4 by 5 meters' or '20 square meters'."),
+           "depth": _text("Depth, e.g. '5 centimeters'. Default five.")}, ["area"]),
+    _tool("grass_seed", "Grass seed quantity for a lawn. Use for 'how much grass seed for 100 square meters', "
+          "'seed a lawn of 200 square meters'.",
+          {"area": _text("The lawn area, e.g. '100 square meters'."),
+           "rate": _text("Seeding rate, e.g. '30 grams per square meter'. Optional.")}, ["area"]),
+    _tool("fence_calculator", "Posts, panels and concrete for a fence run. Use for 'how many posts for 20 meters of fence', "
+          "'materials for a 30 meter fence'.",
+          {"length": _text("The fence length, e.g. '20 meters'."),
+           "spacing": _text("Post spacing, e.g. '2.4 meters'. Optional."),
+           "panel": _text("Panel width, e.g. '1.8 meters'. Optional."),
+           "concrete": _text("Bags of concrete per post, e.g. '2'. Optional.")}, ["length"]),
+    _tool("room_heating", "Heater or air conditioner size for a room. Use for 'what size heater for a 4 by 5 meter room', "
+          "'how many BTU to cool this room', 'radiator size for a bedroom'.",
+          {"room": _text("The room size, e.g. '4 by 5 meters'."),
+           "height": _text("Ceiling height, e.g. '2.5 meters'. Optional."),
+           "insulation": _text("'average' normally. Also 'poor' or 'good'.")}, ["room"]),
+    # kitchen
+    _tool("rice_ratio", "Water ratio and cooking time by rice type. Use for 'how much water for basmati rice', "
+          "'how long to cook brown rice', 'rice to water ratio for two cups'.",
+          {"rice": _text("The rice, e.g. 'basmati'. Also 'white', 'brown', 'jasmine', 'sushi', 'wild', 'risotto'."),
+           "cups": _text("How many cups of rice, e.g. '2'. Default one.")}),
+    _tool("pizza_dough", "Flour, water, yeast and salt for a number of pizzas. Use for 'pizza dough for four pizzas', "
+          "'how much flour for six dough balls of 250 grams'.",
+          {"count": _text("How many pizzas, e.g. '4'."),
+           "ball_weight": _text("Dough per pizza in grams, e.g. '250'. Default 250.")}),
+    _tool("brine_calculator", "Salt and water for wet or dry brining. Use for 'how much salt to brine a chicken', "
+          "'dry brine for a 2 kilo pork roast', 'wet brine ratio'.",
+          {"weight": _text("Weight of the meat, e.g. '2 kilos'."),
+           "style": _text("'wet' normally, or 'dry'.")}, ["weight"]),
+    _tool("cake_pan", "Convert a recipe between pan sizes. Use for 'batter for a 20 centimeter round pan in a square pan', "
+          "'how to scale a cake recipe for a bigger tin'.",
+          {"pan_from": _text("The original pan, e.g. '20 centimeter round pan'."),
+           "pan_to": _text("The new pan, e.g. '20 centimeter square pan'.")}, ["pan_from", "pan_to"]),
+    _tool("spice_substitute", "A substitute for a spice or herb. Use for 'what can I use instead of cumin', "
+          "'substitute for fresh basil', 'no cinnamon what else'.",
+          {"spice": _text("The spice or herb, e.g. 'cumin'.")}, ["spice"]),
+    _tool("freezer_storage", "How long a food keeps in the fridge and freezer. Use for 'how long can I freeze chicken', "
+          "'is this soup still good', 'fridge life of cooked rice'.",
+          {"food": _text("The food, e.g. 'chicken'.")}, ["food"]),
+    # health
+    _tool("a1c_convert", "Convert HbA1c between percent and mmol/mol, with estimated average glucose. Use for "
+          "'what is 5.7 percent in mmol', 'convert 39 mmol/mol to percent', 'average glucose from my A1c'.",
+          {"value": _text("The HbA1c value, e.g. '5.7'."),
+           "unit": _text("'percent' normally, or 'mmol/mol'. Optional.")}, ["value"]),
+    _tool("cholesterol_ratio", "Total cholesterol to HDL ratio. Use for 'is 200 over 50 a good cholesterol ratio', "
+          "'what is my cholesterol ratio', 'total to HDL ratio'.",
+          {"total": _text("Total cholesterol, e.g. '200'."),
+           "hdl": _text("HDL cholesterol, e.g. '50'.")}, ["total", "hdl"]),
+    _tool("ideal_weight", "Healthy weight range and a rough ideal weight for a height. Use for 'what should I weigh at 175 centimeters', "
+          "'healthy weight for my height', 'ideal weight for a woman'.",
+          {"height": _text("The height, e.g. '175 centimeters'."),
+           "sex": _text("Optional 'male' or 'female'.")}, ["height"]),
+    _tool("protein_target", "Daily protein grams by weight and activity. Use for 'how much protein should I eat', "
+          "'protein for 70 kilos and gym training', 'daily protein when losing weight'.",
+          {"weight": _text("The body weight, e.g. '70 kilos'."),
+           "activity": _text("Optional 'normal', 'active', 'athlete' or 'diet'.")}, ["weight"]),
+    _tool("bac_estimate", "Rough blood alcohol estimate from standard drinks, weight and time. Use for "
+          "'how drunk am I after three drinks', 'blood alcohol after two beers', 'am I okay to drive'. "
+          "Always include the warning that this is only an estimate.",
+          {"drinks": _text("Number of standard drinks, e.g. '3'."),
+           "weight": _text("Body weight, e.g. '70 kilos'."),
+           "hours": _text("Hours since the first drink, e.g. '1'. Optional."),
+           "sex": _text("'male' normally, or 'female'.")}, ["drinks", "weight"]),
+    # travel and everyday
+    _tool("airport_lookup", "Airport name and city from an IATA code or city. Use for 'what airport is PRG', "
+          "'airport in Lisbon', 'where is JFK'.",
+          {"query": _text("The airport code or city, e.g. 'PRG' or 'Prague'.")}, ["query"]),
+    _tool("emergency_numbers", "The emergency phone number for a country. Use for 'what is the emergency number in Japan', "
+          "'do I call 911 in Spain', 'emergency number for the UK'.",
+          {"country": _text("The country, e.g. 'Japan'.")}, ["country"]),
+    _tool("shoe_size", "Convert a shoe size between EU, US, UK and centimetres. Use for 'what is EU 42 in US', "
+          "'size 9 US in European shoes', 'shoe size conversion'.",
+          {"size": _text("The size, e.g. '42'."),
+           "system": _text("Optional 'EU', 'US', 'US women', 'UK' or 'cm'.")}, ["size"]),
+    _tool("ring_size", "Convert a ring size between US, UK, EU, circumference and diameter. Use for "
+          "'what is US 7 in UK ring size', 'ring size 54 millimeters around', 'convert ring size'.",
+          {"size": _text("The size, e.g. '7' or '54 millimeters'."),
+           "system": _text("Optional 'US', 'UK', 'EU', 'circumference' or 'diameter'.")}, ["size"]),
+    _tool("meeting_time_overlap", "The best overlapping working hours between two places. Use for "
+          "'when can I call Tokyo from Prague', 'best meeting time with New York', 'working hours overlap'.",
+          {"from_place": _text("Your place, e.g. 'Prague'. Leave empty for here."),
+           "to_place": _text("The other place, e.g. 'Tokyo'."),
+           "start": _text("Start of the working day, e.g. '9'. Optional."),
+           "end": _text("End of the working day, e.g. '17'. Optional.")}, ["to_place"]),
+    # tech and internet
+    _tool("dns_records", "MX, TXT and NS records for a domain. Use for 'what are the DNS records for example.com', "
+          "'mail server for my domain', 'check the TXT records'.",
+          {"domain": _text("The domain, e.g. 'example.com'."),
+           "record_type": _text("Optional 'MX', 'TXT', 'NS', 'A', 'AAAA' or 'CNAME'.")}, ["domain"]),
+    _tool("email_validator", "Check the syntax and mail server of an email address. Use for 'is this email valid', "
+          "'does this address exist', 'check the email domain'.",
+          {"email": _text("The address, e.g. 'name@example.com'.")}, ["email"]),
+    _tool("redirect_chain", "Where a web address redirects, and the final address. Use for 'where does this link go', "
+          "'does this URL redirect', 'follow this redirect'.",
+          {"url": _text("The web address, e.g. 'example.com/old'.")}, ["url"]),
+    _tool("password_strength", "Estimate password strength and crack time. Use for 'is this password strong', "
+          "'how long to crack this password', 'check my password'. Nothing leaves the device.",
+          {"password": _text("The password to check, e.g. 'Tr0ub4dor&3'.")}, ["password"]),
+    _tool("cron_next", "The next run times of a five-field cron expression. Use for 'when does 0 7 * * 1 run next', "
+          "'next runs of this cron schedule', 'explain when this cron fires'.",
+          {"expression": _text("The cron expression, e.g. '0 7 * * 1'."),
+           "count": _text("How many run times, e.g. '3'. Up to ten.")}, ["expression"]),
+    _tool("mime_type", "MIME type for a file extension, or extensions for a MIME type. Use for 'what MIME type is a PDF', "
+          "'what extension does application/json use', 'file type for .docx'.",
+          {"name": _text("The extension or MIME type, e.g. '.pdf' or 'application/json'.")}, ["name"]),
+    _tool("chmod_calculator", "Convert between octal and symbolic file permissions. Use for 'what does chmod 755 mean', "
+          "'convert rwxr-xr-x to octal', 'file permissions 644'.",
+          {"value": _text("The permissions, e.g. '755' or 'rwxr-xr-x'.")}, ["value"]),
+    _tool("user_agent_parse", "Browser and operating system from a user agent string. Use for 'what browser is this user agent', "
+          "'parse this user agent', 'which OS is this'.",
+          {"user_agent": _text("The user agent string, e.g. 'Mozilla/5.0 ... Chrome/120.0 ...'.")}, ["user_agent"]),
+    _tool("xml_format", "Check whether XML is valid and describe it. Use for 'is this XML valid', 'check this XML', "
+          "'what is the root element of this XML'.",
+          {"text": _text("The XML to check, e.g. '<note><to>Ada</to></note>'.")}, ["text"]),
+    # text and writing
+    _tool("readability_score", "Reading ease and grade level of a text. Use for 'how readable is this text', "
+          "'what grade level is this', 'reading difficulty of this paragraph'.",
+          {"text": _text("The text to check, e.g. 'The cat sat on the mat.'")}, ["text"]),
+    _tool("slugify", "A URL-friendly slug from a title. Use for 'make a slug from this title', 'URL slug for a blog post', "
+          "'turn this into a link name'.",
+          {"text": _text("The title, e.g. 'Ten Easy Dinners for Autumn'.")}, ["text"]),
+    _tool("anonymize_text", "Redact emails, phone numbers and links from a text. Use for 'remove personal details', "
+          "'anonymize this text', 'hide the emails in this message'.",
+          {"text": _text("The text to redact, e.g. 'mail me at ada@example.com'.")}, ["text"]),
+    _tool("extract_entities", "Pull emails, links, phone numbers and dates from a text. Use for 'find the emails in this text', "
+          "'extract the links', 'what dates are mentioned'.",
+          {"text": _text("The text to search, e.g. 'write to ada@example.com by October 12'.")}, ["text"]),
+    # fun
+    _tool("riddle", "Ask a riddle, or reveal the answer to the last one. Use for 'tell me a riddle', "
+          "'give me a riddle', 'what was the answer'.",
+          {"action": _text("'ask' normally, or 'answer' to reveal the last one.")}),
+    _tool("would_you_rather", "A random would-you-rather question, for fun. Use for 'would you rather', "
+          "'give me a would you rather question', 'ask me a dilemma'."),
+    _tool("story_starter", "A creative writing prompt, for fun. Use for 'give me a story starter', "
+          "'a writing prompt', 'help me start a story'."),
+    # music and school
+    _tool("transpose_chords", "Transpose a chord progression by a number of semitones. Use for 'transpose C G Am F up two semitones', "
+          "'change this chord progression to another key', 'what are these chords in D'.",
+          {"progression": _text("The chords, e.g. 'C G Am F'."),
+           "semitones": _text("How many semitones, e.g. '2'. Negative goes down.")}, ["progression"]),
+    _tool("gpa_calculator", "GPA from letter grades and optional credits. Use for 'what is my GPA with A, B+ and C', "
+          "'calculate GPA from grades and credits', 'weighted GPA'.",
+          {"grades": _text("The grades, e.g. 'A, B+ and C'."),
+           "credits": _text("Optional credits in the same order, e.g. '3, 4, 3'.")}, ["grades"]),
+]
+_EXTRA_SPECS.extend(_MORE_SPECS7)
+
+
 
 _DISABLED = {n.strip().lower() for n in _env("DISABLED_TOOLS").split(",") if n.strip()}
 TOOLS.extend(s for s in _EXTRA_SPECS if s["function"]["name"] not in _DISABLED)
@@ -9755,6 +11545,34 @@ _NEW_FUNCS2 = {f.__name__: f for f in (
 
 _EXTRA_FUNCS.update(_NEW_FUNCS2)
 
+# ---- the newest fifty more tools (batch 3) --------------------------------
+_NEW_FUNCS3 = {f.__name__: f for f in (
+    snow_report, driving_conditions, surf_report, frost_risk, plant_water, laundry_drying,
+    stargazing_conditions, constellation_info, wallpaper_calculator, board_foot, roof_pitch,
+    stair_calculator, mulch_calculator, grass_seed, fence_calculator, room_heating, rice_ratio,
+    pizza_dough, brine_calculator, cake_pan, spice_substitute, freezer_storage, a1c_convert,
+    cholesterol_ratio, ideal_weight, protein_target, bac_estimate, airport_lookup, emergency_numbers,
+    shoe_size, ring_size, meeting_time_overlap, dns_records, email_validator, redirect_chain,
+    password_strength, cron_next, mime_type, chmod_calculator, user_agent_parse, xml_format,
+    readability_score, slugify, anonymize_text, extract_entities, riddle, would_you_rather,
+    story_starter, transpose_chords, gpa_calculator)}
+
+_EXTRA_FUNCS.update(_NEW_FUNCS3)
+
+# Input-only, personal or side-effect tools are not automation blocks. The
+# read-only weather tools above stay schedulable for morning briefings.
+_NEW_EXCLUDED3 = {
+    "constellation_info", "wallpaper_calculator", "board_foot", "roof_pitch", "stair_calculator",
+    "mulch_calculator", "grass_seed", "fence_calculator", "room_heating", "rice_ratio",
+    "pizza_dough", "brine_calculator", "cake_pan", "spice_substitute", "freezer_storage",
+    "a1c_convert", "cholesterol_ratio", "ideal_weight", "protein_target", "bac_estimate",
+    "airport_lookup", "emergency_numbers", "shoe_size", "ring_size", "meeting_time_overlap",
+    "dns_records", "email_validator", "redirect_chain", "password_strength", "cron_next",
+    "mime_type", "chmod_calculator", "user_agent_parse", "xml_format", "readability_score",
+    "slugify", "anonymize_text", "extract_entities", "riddle", "would_you_rather",
+    "story_starter", "transpose_chords", "gpa_calculator",
+}
+
 _NEW_EXCLUDED2 = {
     "weather_on_date", "reddit_top", "arxiv_search", "stackoverflow_search", "github_user", "domain_info",
     "link_preview", "word_origin", "pronounce_word", "acronym_expand", "city_info", "movie_info",
@@ -9819,6 +11637,7 @@ _EXTRA_AUTOMATION_EXCLUDED |= {
 }
 _EXTRA_AUTOMATION_EXCLUDED |= _NEW_EXCLUDED
 _EXTRA_AUTOMATION_EXCLUDED |= _NEW_EXCLUDED2
+_EXTRA_AUTOMATION_EXCLUDED |= _NEW_EXCLUDED3
 AUTOMATION_EXCLUDED |= _EXTRA_AUTOMATION_EXCLUDED
 
 
