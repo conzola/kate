@@ -2,13 +2,13 @@
 
 # Kate · LLM
 
-**The local brain of a 120-tool voice assistant.**
+**The local brain of a 150-tool voice assistant.**
 
 One model. Plain-text tags. No cloud LLM calls.
 
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
 ![LM Studio](https://img.shields.io/badge/LM%20Studio-local-6E56CF)
-![Tools](https://img.shields.io/badge/tools-120-16A34A)
+![Tools](https://img.shields.io/badge/tools-150-16A34A)
 ![License](https://img.shields.io/badge/license-MIT-0EA5E9)
 
 </div>
@@ -17,7 +17,7 @@ One model. Plain-text tags. No cloud LLM calls.
 >
 > `ask()` sends the turn to a local model. The model replies in plain text and drops tool tags inline, like `<get_weather; "Prague"/>`. Before anything is spoken, Python replaces those tags with live results. The model never has to *know* today's weather, the news, or the time — it only has to know **how to ask**.
 
-This folder is the LLM layer of [Kate](../README.md): the part between speech recognition and speech synthesis. It owns the conversation, the 120-tool catalog, and the scheduler that runs little workflows later on its own.
+This folder is the LLM layer of [Kate](../README.md): the part between speech recognition and speech synthesis. It owns the conversation, the 150-tool catalog, and the scheduler that runs little workflows later on its own.
 
 ---
 
@@ -42,7 +42,7 @@ This folder is the LLM layer of [Kate](../README.md): the part between speech re
 | **Model** | Any OpenAI-compatible server. Default: [LM Studio](https://lmstudio.ai/) + `qwen3.5-4b` |
 | **Endpoint** | The LM Studio URL configured by `LM_URL` in `main.py` — loopback or a LAN host |
 | **Tool protocol** | Prompt-driven inline tags — **not** native function calling |
-| **Tool catalog** | **120** Python functions returning speech-ready strings |
+| **Tool catalog** | **150** Python functions returning speech-ready strings |
 | **Automation blocks** | Any registered tool; the same catalog powers chat and schedules |
 | **Memory** | Last 12 messages (6 exchanges); reset after 10 minutes idle |
 | **Dependencies** | `requests`; `psutil` is optional (only for `pc_status`) |
@@ -52,7 +52,7 @@ This folder is the LLM layer of [Kate](../README.md): the part between speech re
 | File | Responsibility |
 |---|---|
 | [`main.py`](main.py) | One turn: prompt assembly, LM Studio call, streaming, memory, `/continue` |
-| [`tools.py`](tools.py) | 120 tool functions, the tool spec catalog, tag parser, timers and personal data |
+| [`tools.py`](tools.py) | 150 tool functions, the tool spec catalog, tag parser, timers and personal data |
 | [`automatization.py`](automatization.py) | Recurring workflows, trigger parsing, the scheduler and automation tags |
 
 ### Why this design is interesting
@@ -129,7 +129,7 @@ flowchart LR
     F --> G["resolve_tool_tags()"]
     G --> H["spoken text<br/>+ /continue"]
     H --> I["TTS / speaker"]
-    G -. "HTTP + local JSON" .-> J["120 tools"]
+    G -. "HTTP + local JSON" .-> J["150 tools"]
     F -. "writes" .-> K["automatizations.json"]
     K -. "read by" .-> L["scheduler_loop()"]
     L -. "runs later" .-> J
@@ -194,10 +194,10 @@ Unknown tool names and tags that are never closed are **left as text**, not exec
 
 ## The tool catalog
 
-**120 tools**, grouped by what they are for. Each one returns a short string designed to be spoken, not raw JSON.
+**150 tools**, grouped by what they are for. Each one returns a short string designed to be spoken, not raw JSON.
 
 <details open>
-<summary><b>Time, weather & sky</b> · 17 tools</summary>
+<summary><b>Time, weather & sky</b> · 21 tools</summary>
 
 | Tool | What it does |
 |---|---|
@@ -218,11 +218,15 @@ Unknown tool names and tags that are never closed are **left as text**, not exec
 | `next_holiday` | Next public holidays for a country |
 | `name_day` | Czech name day for today, tomorrow or a date |
 | `daily_briefing` | Date, weather, air, sunset, holiday, birthdays, calendar, to-do list and headlines |
+| `what_to_wear` | What to put on from the day's forecast: layers, rain gear, wind, sun and ice |
+| `clock_change` | When the clocks next change for daylight saving, and the effect on your sleep |
+| `long_weekends` | The next long weekends of a country and whether a bridge day is needed |
+| `time_until` | How long it is until a clock time like 6 PM |
 
 </details>
 
 <details>
-<summary><b>News & internet</b> · 14 tools</summary>
+<summary><b>News & internet</b> · 18 tools</summary>
 
 | Tool | What it does |
 |---|---|
@@ -240,11 +244,15 @@ Unknown tool names and tags that are never closed are **left as text**, not exec
 | `get_crypto_price` | Current cryptocurrency price |
 | `convert_currency` | Live exchange-rate conversion |
 | `country_info` | Capital, population and currency of a country |
+| `ip_lookup` | Where an IP address or website is hosted and who runs the network |
+| `dns_lookup` | The IP addresses a website or host name points to |
+| `ssl_expiry` | Days until a site's HTTPS certificate expires |
+| `next_launch` | The next rocket launches: who, what, from where and when |
 
 </details>
 
 <details>
-<summary><b>Timers & device</b> · 12 tools</summary>
+<summary><b>Timers & device</b> · 13 tools</summary>
 
 | Tool | What it does |
 |---|---|
@@ -260,6 +268,7 @@ Unknown tool names and tags that are never closed are **left as text**, not exec
 | `smart_home` | Home Assistant lights, switches, blinds, locks, scenes and climate |
 | `home_status` | State of a smart-home device or sensor |
 | `wake_on_lan` | Wake a PC or NAS on the local network |
+| `pomodoro` | Focus rounds with spoken break reminders (cancel with `cancel_timer`) |
 
 </details>
 
@@ -282,7 +291,7 @@ Unknown tool names and tags that are never closed are **left as text**, not exec
 </details>
 
 <details>
-<summary><b>Personal tracking</b> · 9 tools</summary>
+<summary><b>Personal tracking</b> · 11 tools</summary>
 
 | Tool | What it does |
 |---|---|
@@ -295,11 +304,13 @@ Unknown tool names and tags that are never closed are **left as text**, not exec
 | `spending_summary` | Totals by period or category |
 | `undo_last_expense` | Delete the most recent expense |
 | `set_home_location` | Remember the home city used as the default place |
+| `log_weight` | Write down today's weight, one weigh-in per day |
+| `weight_trend` | How the logged weight changed over a week, month, year or since the start |
 
 </details>
 
 <details>
-<summary><b>Knowledge & language</b> · 13 tools</summary>
+<summary><b>Knowledge & language</b> · 15 tools</summary>
 
 | Tool | What it does |
 |---|---|
@@ -316,11 +327,13 @@ Unknown tool names and tags that are never closed are **left as text**, not exec
 | `pokemon_info` | Pokédex type, size, abilities and description |
 | `random_wikipedia` | Summary of a random Wikipedia article |
 | `animal_sound` | An animal sound plus a fun fact |
+| `nato_alphabet` | Spell a name with the phonetic alphabet (Alpha, Bravo, Charlie) |
+| `anagram_check` | Whether two phrases are anagrams, or one is a palindrome |
 
 </details>
 
 <details>
-<summary><b>Food, health & fitness</b> · 13 tools</summary>
+<summary><b>Food, health & fitness</b> · 17 tools</summary>
 
 | Tool | What it does |
 |---|---|
@@ -337,11 +350,15 @@ Unknown tool names and tags that are never closed are **left as text**, not exec
 | `quick_workout` | Short bodyweight workout |
 | `sleep_calculator` | Bedtime or wake-up time from 90-minute sleep cycles |
 | `fuel_cost` | Fuel needed and cost for a trip |
+| `recipe_scaler` | Scale recipe amounts to another number of servings |
+| `one_rep_max` | Estimated one-rep max and working weights for common rep ranges |
+| `calories_burned` | Calories burned by an activity, using your logged weight |
+| `race_predictor` | Predict race times for other distances from one result |
 
 </details>
 
 <details>
-<summary><b>Math & money</b> · 16 tools</summary>
+<summary><b>Math & money</b> · 24 tools</summary>
 
 | Tool | What it does |
 |---|---|
@@ -361,11 +378,19 @@ Unknown tool names and tags that are never closed are **left as text**, not exec
 | `discount_calculator` | Price after a percentage discount, or two stacked discounts |
 | `electricity_cost` | Running cost of an appliance |
 | `hourly_wage` | Convert pay between hourly, weekly, monthly and yearly |
+| `percentage_change` | Percent change from an old value to a new one |
+| `savings_goal` | Monthly saving needed for a goal, time to reach it, or whether a plan gets there |
+| `fraction_tools` | Simplify fractions, decimals to fractions, and fraction arithmetic |
+| `number_theory` | Prime check, prime factors, greatest common divisor and least common multiple |
+| `quadratic_solver` | Solve a x² + b x + c = 0, including from an equation like `2x^2 - 4x + 1` |
+| `shape_calculator` | Area, perimeter, volume and surface of common 2D and 3D shapes |
+| `working_days` | Working days until a date, or the date N working days away, skipping holidays |
+| `fuel_economy` | Convert between l/100 km, km/l and miles per gallon (US and UK) |
 
 </details>
 
 <details>
-<summary><b>Tech & DIY</b> · 4 tools</summary>
+<summary><b>Tech & DIY</b> · 9 tools</summary>
 
 | Tool | What it does |
 |---|---|
@@ -373,6 +398,11 @@ Unknown tool names and tags that are never closed are **left as text**, not exec
 | `ohms_law` | Voltage, current, resistance and power from any two of them |
 | `paint_calculator` | How much paint a room needs |
 | `download_time` | How long a download takes at a given speed |
+| `subnet_calculator` | Network, mask, broadcast and usable hosts, or the subnet that fits N hosts |
+| `led_resistor` | Series resistor for an LED, with the next standard value and its power |
+| `resistor_code` | Resistor color bands to a value, or a value to its bands |
+| `battery_life` | How long a battery lasts for a given draw |
+| `unix_time` | Unix timestamp to date, date to timestamp, or the current timestamp |
 
 </details>
 
@@ -456,6 +486,8 @@ The `automatization` spelling is the one used by the code and tags. Removal matc
 
 Any registered tool can be written as a block. That flexibility is best used for read-only information tools. Timers, the stopwatch, random one-shots and tools that change personal data are poor fits — they depend on the moment or on a live user.
 
+Read-only tools added later fit well too: `what_to_wear`, `clock_change`, `long_weekends`, `ssl_expiry`, `next_launch` and `weight_trend`. For example, `<new_automatization; time="on weekdays at 7:30 AM"; actions="what_to_wear=\"Prague\""/>` tells you what to put on every morning.
+
 `set_volume` is a deliberate exception: "every night at 10 PM turn the volume down" is a legitimate automation.
 
 ### The scheduler
@@ -537,7 +569,7 @@ Forecasts, geocoding, air quality, pollen and world time use Open-Meteo. Currenc
 | `AUTOMATIONS_FILE` | `<repo>/automatizations.json` | Workflow storage |
 | `TIMERS_FILE` | `<repo>/timers.json` | Timers, reminders and stopwatch |
 | `DEVICE_STATE_FILE` | `<repo>/device_state.json` | Speaker volume |
-| `USER_DATA_FILE` | `<repo>/user_data.json` | Home city, notes, lists, calendar, habits, expenses, birthdays |
+| `USER_DATA_FILE` | `<repo>/user_data.json` | Home city, notes, lists, calendar, habits, expenses, birthdays, weight log |
 
 ---
 
@@ -551,7 +583,7 @@ Nothing important lives only in RAM. These JSON files sit next to the code at th
 | `automatizations.json` | [`automatization.py`](automatization.py) | Triggers, action pipelines, `last_run` |
 | `timers.json` | [`tools.py`](tools.py) | Active timers, reminders, alarms and stopwatch |
 | `device_state.json` | [`tools.py`](tools.py) | Speaker volume |
-| `user_data.json` | [`tools.py`](tools.py) | Home location, notes, lists, calendar, habits, expenses and birthdays |
+| `user_data.json` | [`tools.py`](tools.py) | Home location, notes, lists, calendar, habits, expenses, birthdays and weight log |
 
 All of them use a temp-file-plus-replace write, guarded by locks where two threads can touch the same file. They are ignored by git. Delete a file while the app is stopped to reset that store; use `reset_memory()` for the live conversation.
 
@@ -664,7 +696,7 @@ Adding a tool automatically adds it to the chat prompt and makes it available as
    }
    ```
 
-4. **Think about schedules.** It is available as a block by default. That suits read-only information tools; avoid scheduling tools that need live input or change personal data.
+4. **Think about schedules.** It is available as a block by default. That suits read-only information tools. For anything that needs live input or changes personal data, add its name to `_EXTRA_AUTOMATION_EXCLUDED` (near the bottom of `tools.py`) so it is not offered as an automation block.
 
 5. **Test the whole stack.**
 

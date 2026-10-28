@@ -1,7 +1,9 @@
 import ast
 import base64
 import calendar
+import collections
 import html as _html
+import ipaddress
 import json
 import math
 import operator
@@ -11,12 +13,14 @@ import re
 import secrets
 import shutil
 import socket
+import ssl
 import statistics
 import threading
 import time
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+from fractions import Fraction
 from pathlib import Path
 from urllib.parse import quote, unquote, urlparse
 from xml.etree import ElementTree
@@ -4994,6 +4998,1287 @@ _MORE_SPECS3 = [
 _EXTRA_SPECS.extend(_MORE_SPECS3)
 
 
+# ---------------------------------------------------------------------------
+# 30 more tools: outfit and clock advice, network checks, electronics, maths,
+# fitness and weight tracking. Same rules as above: no API keys, speech-ready
+# strings, no trailing period.
+# ---------------------------------------------------------------------------
+_EXTRA_COUNTRY_NAMES = {
+    "china": "CN", "india": "IN", "russia": "RU", "turkey": "TR", "iceland": "IS", "south korea": "KR",
+    "korea": "KR", "singapore": "SG", "thailand": "TH", "indonesia": "ID", "vietnam": "VN", "pakistan": "PK",
+    "brazil": "BR", "mexico": "MX", "new zealand": "NZ", "ukraine": "UA", "denmark": "DK", "finland": "FI",
+    "croatia": "HR", "romania": "RO", "bulgaria": "BG", "slovenia": "SI", "estonia": "EE", "latvia": "LV",
+    "lithuania": "LT", "luxembourg": "LU", "malta": "MT", "cyprus": "CY", "serbia": "RS", "uae": "AE",
+    "united arab emirates": "AE", "saudi arabia": "SA", "south africa": "ZA", "argentina": "AR", "chile": "CL",
+}
+
+
+def _country_code(text: str = ""):
+    """'Czech Republic' / 'cz' / '' (the home country) -> 'CZ', or None when unknown."""
+    low = re.sub(r"^(?:the|in)\s+", "", " ".join(str(text or "").lower().split()))
+    if not low:
+        return _default_country().upper()
+    if low in _COUNTRIES:
+        return _COUNTRIES[low]
+    if low in _EXTRA_COUNTRY_NAMES:
+        return _EXTRA_COUNTRY_NAMES[low]
+    return low.upper() if re.fullmatch(r"[a-z]{2}", low) else None
+
+
+def _host_of(text: str) -> str:
+    """The host name inside 'https://example.com/page', 'example.com:8080' or 'is example.com up'."""
+    low = re.sub(r"^[a-z][a-z0-9+.-]*://", "", str(text or "").lower().strip())
+    found = re.search(r"(?:[a-z0-9-]+\.)+[a-z0-9-]+", low) or re.fullmatch(r"[a-z0-9-]+", re.split(r"[/:]", low)[0])
+    host = found.group(0).strip(".") if found else ""
+    return host if 0 < len(host) <= 253 else ""
+
+
+def _neg(x: float) -> str:
+    """A signed number the way it is spoken: 'minus 3'."""
+    return f"minus {_short(-x)}" if x < 0 else _short(x)
+
+
+def _ohms_text(value: float) -> str:
+    text = _eng(value, "ohms")
+    return text.replace("ohms", "ohm", 1) if text.startswith("1 ") else text
+
+
+_FRACTION_NAMES = {2: "half", 3: "third", 4: "quarter", 5: "fifth", 6: "sixth", 7: "seventh", 8: "eighth",
+                   9: "ninth", 10: "tenth"}
+
+
+def _say_fraction(fr: Fraction) -> str:
+    """Fraction as it is spoken: 3 quarters, 1 and a half, 5 over 12."""
+    sign = "minus " if fr < 0 else ""
+    fr = abs(fr)
+    whole, rest = divmod(fr.numerator, fr.denominator)
+    if rest == 0:
+        return f"{sign}{whole}"
+    name = _FRACTION_NAMES.get(fr.denominator)
+    if name is None:
+        part = f"{rest} over {fr.denominator}"
+    elif rest == 1:
+        part = f"{'an' if name[0] in 'aeiou' else 'a'} {name}"
+    else:
+        part = f"{rest} {name}s"
+    return f"{sign}{whole} and {part}" if whole else f"{sign}{part}"
+
+
+def _parse_fraction(text: str):
+    """'3/12', '1 1/2', '0.75', '2' -> Fraction, or None."""
+    s = " ".join(re.sub(r"\band\b", " ", str(text or "").lower().replace(",", "")).split())
+    try:
+        m = re.fullmatch(r"(-?\d+)\s+(\d+)\s*/\s*(\d+)", s)
+        if m:
+            fr = Fraction(abs(int(m[1])) * int(m[3]) + int(m[2]), int(m[3]))
+            return -fr if m[1].startswith("-") else fr
+        if re.fullmatch(r"-?\d+\s*/\s*\d+", s):
+            return Fraction(s.replace(" ", ""))
+        if re.fullmatch(r"-?(?:\d+\.?\d*|\.\d+)", s):
+            return Fraction(s)
+    except (ZeroDivisionError, ValueError):
+        return None
+    return None
+
+
+def _big_amount(text):
+    """'5000', '50k', '1.5 million' -> a float, or None."""
+    s = re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", str(text or "").lower())
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(k|thousand|m|million)?\b", s)
+    if not m:
+        return None
+    return float(m.group(1)) * {"k": 1e3, "thousand": 1e3, "m": 1e6, "million": 1e6}.get(m.group(2), 1)
+
+
+def _on(label: str) -> str:
+    return label if label in ("today", "yesterday") else f"on {label}"
+
+
+def _when_label(d: date) -> str:
+    days = (date.today() - d).days
+    return "today" if days == 0 else "yesterday" if days == 1 else _fmt_date(d, False)
+
+
+# ---- sky and calendar -------------------------------------------------------
+_OUTFITS = ((-5, "a heavy winter coat, a hat, gloves and a scarf over warm layers"),
+            (3, "a warm winter coat, a hat and gloves"),
+            (10, "a warm jacket and long trousers"),
+            (16, "a light jacket or a sweater"),
+            (22, "a long sleeve shirt or a thin layer you can take off"),
+            (27, "a t-shirt and light trousers or shorts"))
+
+
+def what_to_wear(location: str = "", day: str = "today") -> str:
+    """What to put on, from the day's forecast: layers, rain gear, wind, sun and ice."""
+    place = _geocode(location)
+    if not place:
+        return _no_place(location)
+    data = _get("https://api.open-meteo.com/v1/forecast",
+                {"latitude": place["latitude"], "longitude": place["longitude"], "timezone": "auto",
+                 "forecast_days": 7,
+                 "daily": "weather_code,temperature_2m_max,temperature_2m_min,"
+                          "precipitation_probability_max,wind_speed_10m_max,uv_index_max"})
+    daily = (data or {}).get("daily")
+    if not daily:
+        return "Sorry, I could not get the forecast"
+    dates = daily["time"]
+    index = _day_index(day, dates)
+    if index == "week":
+        return "Ask me about one day at a time, like today, tomorrow or Friday"
+    if index is None or index >= len(dates):
+        return "I can only look seven days ahead"
+    hi, lo = daily["temperature_2m_max"][index], daily["temperature_2m_min"][index]
+    if hi is None or lo is None:
+        return "Sorry, I could not get the temperatures"
+    code = daily["weather_code"][index]
+    rain = daily["precipitation_probability_max"][index] or 0
+    wind = daily["wind_speed_10m_max"][index] or 0
+    uv = (daily.get("uv_index_max") or [None] * 7)[index] or 0
+    feel = hi * 0.6 + lo * 0.4
+    outfit = next((text for limit, text in _OUTFITS if feel < limit), "light, breathable clothes and a hat")
+    extras = []
+    if code in _SNOW_CODES:
+        extras.append("waterproof boots")
+    elif code in _WET_CODES or rain >= 50:
+        extras.append("a rain jacket or an umbrella")
+    elif rain >= 30:
+        extras.append("an umbrella just in case")
+    if wind >= 35 and feel < 22:
+        extras.append("a windproof layer")
+    if uv >= 6 and code not in _WET_CODES:
+        extras.append("sunglasses and sunscreen")
+    if lo <= 0:
+        extras.append("shoes with a good grip, there may be ice")
+    when = date.fromisoformat(dates[index])
+    label = "Today" if index == 0 else "Tomorrow" if index == 1 else WEEKDAYS[when.weekday()]
+    text = (f"{label} in {place.get('name') or 'your area'} it will be {_WMO.get(code, 'mixed weather')}, "
+            f"between {round(lo)} and {round(hi)} degrees, so wear {outfit}")
+    return text + (f". Also bring {_and_join(extras)}" if extras else "")
+
+
+def _sunday_on_or_after(year: int, month: int, day: int) -> date:
+    d = date(year, month, day)
+    return d + timedelta(days=(6 - d.weekday()) % 7)
+
+
+def _last_sunday(year: int, month: int) -> date:
+    d = date(year, month, calendar.monthrange(year, month)[1])
+    return d - timedelta(days=(d.weekday() + 1) % 7)
+
+
+_DST_RULES = {   # kind -> (changes of a year as (date, 'forward' | 'back'), clock text forward, clock text back)
+    "eu": (lambda y: [(_last_sunday(y, 3), "forward"), (_last_sunday(y, 10), "back")], "2 AM to 3 AM", "3 AM to 2 AM"),
+    "us": (lambda y: [(_sunday_on_or_after(y, 3, 8), "forward"), (_sunday_on_or_after(y, 11, 1), "back")],
+           "2 AM to 3 AM", "2 AM to 1 AM"),
+    "au": (lambda y: [(_sunday_on_or_after(y, 4, 1), "back"), (_sunday_on_or_after(y, 10, 1), "forward")],
+           "2 AM to 3 AM", "3 AM to 2 AM"),
+    "nz": (lambda y: [(_sunday_on_or_after(y, 4, 1), "back"), (_last_sunday(y, 9), "forward")],
+           "2 AM to 3 AM", "3 AM to 2 AM"),
+}
+_DST_EU = {"AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR", "HU", "IE", "IT", "LV", "LT", "LU",
+           "MT", "NL", "PL", "PT", "RO", "SK", "SI", "ES", "SE", "GB", "NO", "CH", "LI", "MC", "SM", "VA", "AD", "AL",
+           "BA", "ME", "MK", "RS", "UA"}
+_DST_NONE = {"JP", "CN", "IN", "RU", "TR", "IS", "KR", "SG", "TH", "ID", "VN", "PK", "AE", "SA", "BR", "MX", "ZA"}
+
+
+def clock_change(country: str = "") -> str:
+    """When the clocks next change for daylight saving time, and what it does to a night's sleep."""
+    code = _country_code(country)
+    if not code:
+        return f"I do not know the country {country}"
+    label = " ".join(str(country or "").split()).title() or "your country"
+    if len(label) <= 3 and label.isalpha():
+        label = label.upper()
+    kind = ("eu" if code in _DST_EU else "us" if code in ("US", "CA") else "au" if code == "AU"
+            else "nz" if code == "NZ" else None)
+    if kind is None:
+        if code in _DST_NONE:
+            return f"{label} does not change its clocks"
+        return f"I do not know the clock rules for {label}"
+    rule, text_forward, text_back = _DST_RULES[kind]
+    today = date.today()
+    changes = sorted(rule(today.year) + rule(today.year + 1))
+    when, direction = next((d, k) for d, k in changes if d >= today)
+    days = (when - today).days
+    away = "today" if days == 0 else "tomorrow" if days == 1 else f"in {days} days"
+    caveat = {"us": ", in most places", "au": ", in the states that use daylight saving"}.get(kind, "")
+    if direction == "forward":
+        return (f"In {label} the clocks go forward one hour on {_fmt_date(when)}, {away}{caveat}. "
+                f"At night the clock jumps from {text_forward}, so you lose an hour of sleep")
+    return (f"In {label} the clocks go back one hour on {_fmt_date(when)}, {away}{caveat}. "
+            f"At night the clock goes from {text_back}, so you gain an hour of sleep")
+
+
+def long_weekends(country: str = "", year: str = "") -> str:
+    """The next long weekends (three or more days off) of a country, and whether a bridge day is needed."""
+    code = _country_code(country)
+    if not code:
+        return f"I do not know the country {country}"
+    today = date.today()
+    wanted = _first_float(year)
+    years = [int(wanted)] if wanted and 2000 <= wanted <= 2100 else [today.year, today.year + 1]
+    found, answered = [], False
+    for y in years:
+        data = _get(f"https://date.nager.at/api/v3/LongWeekend/{y}/{code}")
+        answered = answered or data is not None
+        for item in data or []:
+            try:
+                start, end = date.fromisoformat(item["startDate"]), date.fromisoformat(item["endDate"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if end >= today:
+                found.append((start, end, item.get("dayCount") or (end - start).days + 1, bool(item.get("needBridgeDay"))))
+        if len(found) >= 3 and not wanted:
+            break
+    if not found:
+        return "I found no upcoming long weekends" if answered else "Sorry, I could not get the long weekends"
+    found.sort()
+    parts = [f"{_fmt_date(s)} to {_fmt_date(e)}, {n} days" + (", with one bridge day" if bridge else "")
+             for s, e, n, bridge in found[:3]]
+    return "The next long weekends are " + "; ".join(parts)
+
+
+def time_until(clock: str = "") -> str:
+    """How long it is until a clock time, like 6 PM (the next time the clock shows it)."""
+    parsed = parse_clock(clock) or parse_clock("at " + str(clock or ""))
+    if parsed is None:
+        return "Tell me a time, like 6 PM"
+    hour, minute, ambiguous = parsed
+    now = time.time()
+    due = next_occurrence(hour, minute, ambiguous, now, 1 if "tomorrow" in str(clock).lower() else 0)
+    if due is None:
+        return "Sorry, I could not work that out"
+    return f"{say_duration(due - now, exact=due - now < 600)} until {_clock_phrase(due, now)}"
+
+
+# ---- network ----------------------------------------------------------------
+def ip_lookup(address: str = "") -> str:
+    """Where an IP address or a website is (country, city) and who runs the network. Empty means your own."""
+    raw = str(address or "").strip().lower()
+    target, host = "", ""
+    if raw:
+        found = (re.search(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", raw)
+                 or re.search(r"\b[0-9a-f]{0,4}(?::[0-9a-f]{0,4}){2,7}\b", raw))
+        if found:
+            target = found.group(0)
+        else:
+            host = _host_of(raw)
+            if not host:
+                return "Tell me an IP address or a website"
+            try:
+                target = socket.gethostbyname(host)
+            except OSError:
+                return f"I could not find a host called {host}"
+    if target:
+        try:
+            ip = ipaddress.ip_address(target)
+        except ValueError:
+            return f"{target} is not a valid IP address"
+        if ip.is_private or ip.is_loopback or ip.is_link_local:
+            return f"{target} is a private address on a local network, so it has no location"
+    data = _get(f"https://ipwho.is/{target}")
+    if not data or not data.get("success"):
+        return "Sorry, I could not look up that address"
+    place = ", ".join(x for x in (data.get("city"), data.get("region"), data.get("country")) if x)
+    owner = (data.get("connection") or {}).get("isp") or (data.get("connection") or {}).get("org")
+    subject = f"{host} is at {data.get('ip')}, which" if host else (data.get("ip") if target else "Your public address")
+    text = f"{subject} is in {place or 'an unknown place'}"
+    return text + (f", on the network of {owner}" if owner else "")
+
+
+def dns_lookup(host: str = "") -> str:
+    """The IP addresses a website or host name points to."""
+    name = _host_of(host)
+    if not name:
+        return "Tell me which website or host to look up"
+    try:
+        infos = socket.getaddrinfo(name, None, proto=socket.IPPROTO_TCP)
+    except socket.gaierror:
+        return f"I could not find a host called {name}"
+    except OSError:
+        return "Sorry, the name lookup failed"
+    v4, v6 = [], []
+    for family, _kind, _proto, _canon, sockaddr in infos:
+        bucket = v4 if family == socket.AF_INET else v6 if family == socket.AF_INET6 else None
+        if bucket is not None and sockaddr[0] not in bucket:
+            bucket.append(sockaddr[0])
+    if not v4 and not v6:
+        return f"I could not find an address for {name}"
+    text = f"{name} points to {_and_join(v4[:4])}" if v4 else f"{name} only has IPv6 addresses"
+    if v4 and len(v4) > 4:
+        text += f" and {len(v4) - 4} more"
+    if v6 and v4:
+        text += f", and it has {len(v6)} IPv6 {'address' if len(v6) == 1 else 'addresses'} as well"
+    elif v6:
+        text += f", {len(v6)} of them"
+    return text
+
+
+def ssl_expiry(site: str = "") -> str:
+    """Days until the HTTPS certificate of a website expires."""
+    host = _host_of(site)
+    if not host:
+        return "Tell me which website to check"
+    try:
+        with socket.create_connection((host, 443), timeout=6) as sock:
+            with ssl.create_default_context().wrap_socket(sock, server_hostname=host) as tls:
+                cert = tls.getpeercert()
+    except ssl.SSLCertVerificationError as exc:
+        return f"The certificate of {host} is not valid: {exc.verify_message}"
+    except socket.gaierror:
+        return f"I could not find a host called {host}"
+    except (OSError, ssl.SSLError):
+        return f"I could not open a secure connection to {host}"
+    try:
+        expires = ssl.cert_time_to_seconds(cert["notAfter"])
+    except (KeyError, ValueError, TypeError):
+        return f"I could not read the certificate of {host}"
+    days = int((expires - time.time()) // 86400)
+    when = _fmt_date(datetime.fromtimestamp(expires, timezone.utc).date())
+    issuer = next((v for rdn in cert.get("issuer", ()) for k, v in rdn if k == "organizationName"), "")
+    by = f", issued by {issuer}" if issuer else ""
+    if days < 0:
+        return f"The certificate of {host} expired {-days} days ago, on {when}{by}"
+    soon = ". That is soon, time to renew it" if days < 14 else ""
+    return f"The certificate of {host} is valid for {days} more days, until {when}{by}{soon}"
+
+
+def next_launch(count: str = "1") -> str:
+    """The next rocket launches (Launch Library 2): who, what, from where and when."""
+    n = max(1, min(3, int(_first_float(count, 1.0))))
+    results = ((_get("https://ll.thespacedevs.com/2.2.0/launch/upcoming/", {"limit": n}) or {}).get("results")) or []
+    if not results:
+        return "Sorry, I could not get the launch schedule"
+    now, lines = datetime.now(timezone.utc), []
+    for r in results[:n]:
+        parts = [p.strip() for p in str(r.get("name") or "a launch").split("|")]
+        rocket, mission = parts[0], parts[1] if len(parts) > 1 else ""
+        provider = (r.get("launch_service_provider") or {}).get("name") or ""
+        place = ((r.get("pad") or {}).get("location") or {}).get("name") or ""
+        what = f"{mission} on a {rocket}" if mission else rocket
+        line = f"{provider} launches {what}" if provider else f"{what} launches"
+        if place:
+            line += f" from {place}"
+        try:
+            local = datetime.fromisoformat(str(r["net"]).replace("Z", "+00:00")).astimezone()
+            precision = ((r.get("net_precision") or {}).get("name") or "").lower()
+            delta = (local - now.astimezone()).total_seconds()
+            if precision in ("month", "year", "quarter", "half", "subquarter", "subhalf"):
+                line += f", around {MONTHS[local.month - 1]}"
+            elif delta < 0:
+                line += ", any moment now"
+            else:
+                away = f"{int(delta // 86400)} days" if delta >= 172800 else say_duration(delta)
+                line += f", in {away}, on {_fmt_date(local.date())}"
+                if precision in ("", "minute", "hour", "second"):
+                    line += f" at {_clock(local.hour, local.minute)}"
+        except (KeyError, ValueError, TypeError):
+            pass
+        if str((r.get("status") or {}).get("abbrev") or "").upper() in ("TBC", "TBD"):
+            line += " (the date is not confirmed yet)"
+        lines.append(line)
+    return ". Then ".join(lines) if n > 1 else lines[0]
+
+
+# ---- focus and weight tracking -----------------------------------------------
+def pomodoro(work_minutes: str = "25", break_minutes: str = "5", rounds: str = "1") -> str:
+    """Start focus rounds with breaks: spoken reminders say when to rest and when to start again."""
+    work, rest = int(round(_first_float(work_minutes, 25.0))), int(round(_first_float(break_minutes, 5.0)))
+    n = int(_first_float(rounds, 1.0))
+    if not 1 <= work <= 120 or not 1 <= rest <= 60 or not 1 <= n <= 4:
+        return "I can do focus rounds of 1 to 120 minutes, breaks of 1 to 60 minutes, and up to 4 rounds"
+    now = stamp = time.time()
+    for i in range(n):
+        stamp += work * 60
+        last = i == n - 1
+        _add("reminder", int(stamp - now), due=stamp,
+             message="end your focus session, well done" if last else f"take a {rest} minute break")
+        if not last:
+            stamp += rest * 60
+            _add("reminder", int(stamp - now), due=stamp, message="get back to focus, the break is over")
+    if n == 1:
+        return f"Okay, focus for {work} minutes. I will tell you when it is over"
+    return (f"Okay, {n} rounds of {work} minutes with {rest} minute breaks, {say_duration(stamp - now)} in all. "
+            f"I will tell you when to rest and when to start again")
+
+
+def _show_weight(kg: float, unit: str = "kg") -> str:
+    return f"{_short(kg / 0.45359237)} pounds" if unit == "lb" else f"{_short(kg)} kilograms"
+
+
+def _weight_log(data: dict) -> list:
+    log = [e for e in data.get("weights", []) if isinstance(e, dict) and isinstance(e.get("kg"), (int, float))
+           and isinstance(e.get("d"), str)]
+    return sorted(log, key=lambda e: e["d"])
+
+
+def _last_weight():
+    with _DATA_LOCK:
+        log = _weight_log(_data_load())
+    return log[-1]["kg"] if log else None
+
+
+def log_weight(weight: str = "", unit: str = "") -> str:
+    """Write down today's weight (one weigh in per day) and say how it changed since the last one."""
+    text = f"{weight} {unit}".strip()
+    kg = _weight_kg(text)
+    if kg is None or not 20 <= kg <= 400:
+        return "Tell me your weight, like 80 kilos or 176 pounds"
+    low = text.lower()
+    chosen = "lb" if re.search(r"\b(lb|lbs|pound|pounds|stone|st)\b", low) else "kg" if re.search(r"\b(kg|kilo|kilos|kilograms?)\b", low) else None
+    today = date.today()
+    with _DATA_LOCK:
+        data = _data_load()
+        log = [e for e in _weight_log(data) if e["d"] != today.isoformat()]
+        previous = log[-1] if log else None
+        log.append({"d": today.isoformat(), "kg": round(kg, 2)})
+        data["weights"] = log[-1000:]
+        data["weight_unit"] = chosen or data.get("weight_unit") or "kg"
+        _data_save(data)
+        shown_unit = data["weight_unit"]
+    text = f"Okay, I wrote down {_show_weight(kg, shown_unit)} for today"
+    if previous:
+        diff, when = kg - previous["kg"], _when_label(date.fromisoformat(previous["d"]))
+        if abs(diff) < 0.05:
+            text += f", the same as {when}"
+        else:
+            text += f", {'up' if diff > 0 else 'down'} {_show_weight(abs(diff), shown_unit)} since {when}"
+    return text
+
+
+def weight_trend(period: str = "month") -> str:
+    """How the logged weight changed over the last week, month, three months, year or since the start."""
+    with _DATA_LOCK:
+        data = _data_load()
+        log = _weight_log(data)
+    if not log:
+        return "You have not logged your weight yet. Tell me what you weigh and I will write it down"
+    unit = data.get("weight_unit") or "kg"
+    low = (period or "month").lower()
+    days, label, label_in = ((7, "over the last week", "in the last week") if "week" in low
+                             else (90, "over the last three months", "in the last three months") if re.search(r"3 months|three months|quarter", low)
+                             else (365, "over the last year", "in the last year") if "year" in low
+                             else (None, "since you started", "so far") if re.search(r"\ball\b|ever|start|begin", low)
+                             else (30, "over the last month", "in the last month"))
+    window = log if days is None else [e for e in log if e["d"] >= (date.today() - timedelta(days=days)).isoformat()]
+    last = log[-1]
+    if len(window) < 2:
+        return (f"I have only one weigh in {label_in}, {_show_weight(last['kg'], unit)}, "
+                f"{_on(_when_label(date.fromisoformat(last['d'])))}")
+    first, last = window[0], window[-1]
+    diff = last["kg"] - first["kg"]
+    span = max(1, (date.fromisoformat(last["d"]) - date.fromisoformat(first["d"])).days)
+    text = f"{label.capitalize()} you went from {_show_weight(first['kg'], unit)} to {_show_weight(last['kg'], unit)}"
+    if abs(diff) < 0.05:
+        return text + ", no change"
+    text += f", {'up' if diff > 0 else 'down'} {_show_weight(abs(diff), unit)}"
+    if span >= 10:
+        text += f", about {_show_weight(abs(diff) / span * 7, unit)} a week"
+    return text
+
+
+# ---- words ------------------------------------------------------------------
+_NATO = dict(zip("abcdefghijklmnopqrstuvwxyz",
+                 "Alpha Bravo Charlie Delta Echo Foxtrot Golf Hotel India Juliett Kilo Lima Mike November Oscar Papa "
+                 "Quebec Romeo Sierra Tango Uniform Victor Whiskey Xray Yankee Zulu".split()))
+
+
+_NATO_DIGITS = {str(i): w for i, w in enumerate(_NW_ONES[:10])}
+
+
+def nato_alphabet(text: str = "") -> str:
+    """Spell a word or name with the phonetic alphabet (Alpha, Bravo, Charlie), handy on the phone."""
+    raw = str(text or "").strip()
+    if not raw:
+        return "Tell me which word or name to spell"
+    if len(raw) > 30:
+        return "That is too long to spell out, keep it under 30 characters"
+    words = []
+    for word in raw.split():
+        coded = [_NATO[c] if c in _NATO else _NATO_DIGITS[c] for c in word.lower() if c in _NATO or c in _NATO_DIGITS]
+        if coded:
+            words.append(", ".join(coded))
+    if not words:
+        return "I could not find any letters to spell"
+    return f"{raw} is " + "; then ".join(words)
+
+
+def anagram_check(word_a: str = "", word_b: str = "") -> str:
+    """Are two words or phrases anagrams of each other? With only one, is it a palindrome?"""
+    clean = lambda s: re.sub(r"[^a-z0-9]", "", str(s or "").lower())
+    a, b = clean(word_a), clean(word_b)
+    if not a:
+        return "Tell me a word or a phrase"
+    if not b:
+        if len(a) < 2:
+            return "That is too short to say"
+        if a == a[::-1]:
+            return f"Yes, {str(word_a).strip()} reads the same backwards"
+        return f"No, backwards {str(word_a).strip()} reads {' '.join(w[::-1] for w in reversed(str(word_a).split()))}"
+    if a == b:
+        return "Those are the same letters in the same order, so not really an anagram"
+    if sorted(a) == sorted(b):
+        return f"Yes, {str(word_a).strip()} and {str(word_b).strip()} are anagrams"
+    first, second = collections.Counter(a) - collections.Counter(b), collections.Counter(b) - collections.Counter(a)
+    hints = []
+    if first:
+        hints.append("the first has extra " + _and_join(sorted(first.elements())))
+    if second:
+        hints.append("the second has extra " + _and_join(sorted(second.elements())))
+    return "No, they are not anagrams: " + " and ".join(hints)
+
+
+# ---- kitchen, fitness ----------------------------------------------------------
+_UNIT_ABBREVIATIONS = {"g", "kg", "ml", "l", "dl", "cl", "tsp", "tbsp", "oz", "lb", "lbs", "pt", "qt"}
+
+
+def _scaled_amount(x: float) -> str:
+    """A scaled recipe amount, spoken: 3, 1 and a half, 3 quarters, 0.15."""
+    if x >= 10:
+        return _num(round(x))
+    fr = Fraction(x).limit_denominator(8)
+    if fr and abs(float(fr) - x) / x < 0.04:
+        return _say_fraction(fr)
+    return _short(x)
+
+
+def _agree(word: str, amount: float) -> str:
+    """Singular up to one, plural above: 'cups', 'egg'."""
+    if not word or word in _UNIT_ABBREVIATIONS or not word.isalpha():
+        return word
+    if amount > 1.0001:
+        return word if word.endswith("s") else word + "s"
+    return word[:-1] if word.endswith("s") and not word.endswith("ss") and len(word) > 3 else word
+
+
+def recipe_scaler(ingredients: str = "", from_servings: str = "", to_servings: str = "") -> str:
+    """Scale the amounts of a recipe from one number of servings to another."""
+    before, after = _first_float(from_servings), _first_float(to_servings)
+    if not before or not after or not (0 < before <= 200 and 0 < after <= 200):
+        return "Tell me how many servings the recipe is for and how many you want"
+    items = [p.strip() for p in re.split(r",|;|\band\b(?=\s+\d)", str(ingredients or "")) if p.strip()]
+    if not items:
+        return "Tell me the ingredients with amounts, like 2 cups flour and 3 eggs"
+    factor, out = after / before, []
+    for item in items[:12]:
+        parsed = _qty(item)
+        if not parsed or parsed[0] <= 0:
+            out.append(item)        # 'salt to taste' stays as it is
+            continue
+        value, rest = parsed
+        scaled = value * factor
+        words = rest.split()
+        if words:
+            words[0] = _agree(words[0], scaled)
+        out.append(" ".join([_scaled_amount(scaled)] + words))
+    return f"For {_short(after)} servings instead of {_short(before)}: " + "; ".join(out)
+
+
+def one_rep_max(weight: str = "", reps: str = "") -> str:
+    """Estimated one rep max from a lift (Epley and Brzycki averaged) and the weights for common rep ranges."""
+    w, r = _first_float(weight), _first_float(reps)
+    if w is None or r is None or w <= 0 or not 1 <= r <= 30:
+        return "Tell me the weight you lifted and how many reps, like 80 kilos for 5 reps"
+    unit = "pounds" if re.search(r"\b(lb|lbs|pound|pounds)\b", str(weight).lower()) else "kilograms"
+    if r == 1:
+        estimate = w
+    else:
+        estimate = (w * (1 + r / 30) + w * 36 / (37 - r)) / 2
+    text = (f"Your estimated one rep max is about {_short(estimate)} {unit}. For working sets: "
+            f"90 percent is {_short(estimate * 0.9)} for about 3 reps, 80 percent is {_short(estimate * 0.8)} "
+            f"for about 8, and 70 percent is {_short(estimate * 0.7)} for about 12")
+    return text + (". With more than 12 reps this is only a rough guess" if r > 12 else "")
+
+
+_MET = {"brisk walking": 4.3, "power walking": 4.8, "walking": 3.5, "walk": 3.5, "jogging": 7.0, "running": 9.8,
+        "run": 9.8, "sprint": 12.0, "cycling": 7.5, "biking": 7.5, "bike": 7.5, "swimming": 6.0, "swim": 6.0,
+        "hiking": 6.0, "hike": 6.0, "yoga": 2.5, "pilates": 3.0, "weightlifting": 3.5, "weights": 3.5,
+        "strength": 3.5, "dancing": 5.0, "dance": 5.0, "rowing": 7.0, "stairs": 8.8, "football": 7.0,
+        "soccer": 7.0, "basketball": 6.5, "tennis": 7.3, "table tennis": 4.0, "jump rope": 11.0,
+        "skipping": 11.0, "cleaning": 3.3, "gardening": 3.8, "mowing": 5.5, "skiing": 7.0, "skating": 7.0,
+        "elliptical": 5.0, "hiit": 8.0, "climbing": 8.0, "boxing": 7.8, "volleyball": 4.0, "badminton": 5.5,
+        "golf": 4.8}
+
+
+def calories_burned(activity: str = "", minutes: str = "", weight: str = "") -> str:
+    """Rough calories burned by an activity (MET values). Uses the last logged weight when none is given."""
+    low = " ".join(str(activity or "").lower().split())
+    key = next((k for k in sorted(_MET, key=len, reverse=True) if re.search(rf"\b{re.escape(k)}", low)), None)
+    if not key:
+        return "I know walking, running, cycling, swimming, hiking, yoga, weights, dancing and many more sports"
+    seconds = parse_duration(str(minutes or ""), bare_minutes=True)
+    if not seconds or seconds <= 0:
+        return "Tell me how long you did it, like 30 minutes"
+    kg = _weight_kg(weight) if str(weight or "").strip() else _last_weight()
+    if kg is None:
+        return "Tell me your weight, or log it first by saying what you weigh"
+    if not 20 <= kg <= 400:
+        return "That weight does not look right to me"
+    burned = _MET[key] * kg * seconds / 3600
+    return f"About {_num(round(burned))} calories burned in {say_duration(seconds)} of {key}, at {_short(kg)} kilograms"
+
+
+_RACES = ((5.0, "5 kilometers"), (10.0, "10 kilometers"), (21.0975, "a half marathon"), (42.195, "a marathon"))
+
+
+def race_predictor(distance: str = "", time_text: str = "", target: str = "") -> str:
+    """Predict race times for other distances from one result (Riegel formula)."""
+    km, seconds = _distance_km(distance), _time_seconds(time_text)
+    if not km or not seconds or km <= 0 or seconds <= 0:
+        return "Tell me a recent race, like 5 kilometers in 25 minutes"
+    if str(target or "").strip():
+        goal = _distance_km(target)
+        if not goal or goal <= 0:
+            return "I did not understand the distance you want a prediction for"
+        targets = [(goal, str(target).strip())]
+    else:
+        targets = [(d, name) for d, name in _RACES if abs(d - km) / km > 0.02]
+    if not targets:
+        return "That is already the distance you ran"
+    parts = [f"{name} in {say_duration(seconds * (d / km) ** 1.06, exact=True)}" for d, name in targets]
+    return "With similar training you could run " + "; ".join(parts)
+
+
+# ---- maths -------------------------------------------------------------------
+def percentage_change(old: str = "", new: str = "") -> str:
+    """Percent change from an old value to a new one."""
+    a, b = _first_float(old), _first_float(new)
+    if a is None or b is None:
+        return "Tell me the old value and the new value"
+    if a == 0:
+        return "I cannot work out a percent change from zero"
+    change = (b - a) / abs(a) * 100
+    if abs(change) < 0.005:
+        return f"From {_neg(a)} to {_neg(b)} there is no change"
+    return (f"From {_neg(a)} to {_neg(b)} is {'an increase' if change > 0 else 'a decrease'} of "
+            f"{_short(abs(change))} percent, a difference of {_short(abs(b - a))}")
+
+
+def _months_text(months: float) -> str:
+    months = max(1, int(math.ceil(months - 1e-9)))
+    years, rest = divmod(months, 12)
+    parts = [f"{x} {u}{'' if x == 1 else 's'}" for x, u in ((years, "year"), (rest, "month")) if x]
+    return _and_join(parts)
+
+
+def savings_goal(goal: str = "", monthly_deposit: str = "", years: str = "", rate: str = "0",
+                 current_savings: str = "0") -> str:
+    """How much to save a month for a goal, how long a monthly saving takes, or whether a plan reaches it."""
+    target = _big_amount(goal)
+    if target is None or target <= 0:
+        return "Tell me the amount you want to save up"
+    deposit = _big_amount(monthly_deposit) if str(monthly_deposit or "").strip() else None
+    span = _years(years) if str(years or "").strip() else None
+    yearly = _first_float(rate, 0.0)
+    have = (_big_amount(current_savings) if str(current_savings or "").strip() else 0.0) or 0.0
+    m = yearly / 1200
+    at_rate = f" at {_short(yearly)} percent interest" if yearly else ""
+    if deposit is None and span:
+        n = max(1, round(span * 12))
+        growth = (1 + m) ** n
+        need = (target - have) / n if m == 0 else (target - have * growth) / ((growth - 1) / m)
+        if need <= 0:
+            return "Your current savings already grow to that goal on their own"
+        return f"To have {_cash(target)} in {_months_text(n)} you need to save about {_cash(need)} a month{at_rate}"
+    if deposit and span is None:
+        if have >= target:
+            return "You already have that much"
+        if m == 0:
+            n = (target - have) / deposit
+        else:
+            n = math.log((target + deposit / m) / (have + deposit / m)) / math.log(1 + m)
+        if n > 1200:
+            return "At that pace it would take more than a hundred years"
+        return f"Saving {_cash(deposit)} a month you reach {_cash(target)} in about {_months_text(n)}{at_rate}"
+    if deposit and span:
+        n = max(1, round(span * 12))
+        growth = (1 + m) ** n
+        final = have * growth + (deposit * n if m == 0 else deposit * (growth - 1) / m)
+        verdict = "that reaches" if final >= target else f"that falls {_cash(target - final)} short of"
+        return f"Saving {_cash(deposit)} a month for {_months_text(n)} gives about {_cash(final)}{at_rate}, {verdict} your goal"
+    return "Tell me either how much you can save a month or how many years you have"
+
+
+def fraction_tools(value: str = "") -> str:
+    """Simplify a fraction, turn a decimal into a fraction, or add, subtract, multiply and divide fractions."""
+    text = " ".join(str(value or "").lower().split())
+    if not text:
+        return "Tell me a fraction or a decimal, like 3/12 or 0.375"
+    for pattern, symbol in ((r"\bplus\b", "+"), (r"\bminus\b", "-"), (r"\b(?:times|multiplied by)\b", "*"),
+                            (r"\bdivided by\b", "/"), ("×", "*"), ("÷", "/")):
+        text = re.sub(pattern, f" {symbol} ", text)
+    parts = re.split(r"\s+([+\-*/])\s+", " ".join(text.split()))
+
+    def decimal(fr: Fraction) -> str:
+        return _num(round(float(fr), 4))
+
+    if len(parts) == 1:
+        fr = _parse_fraction(parts[0])
+        if fr is None:
+            return "Sorry, I could not read that fraction"
+        if "/" in parts[0] and "." not in parts[0]:
+            if fr.denominator == 1:
+                return f"{parts[0]} is {fr.numerator}"
+            if str(fr) == parts[0].replace(" ", ""):
+                return f"{parts[0]} is already as simple as it gets, {decimal(fr)} as a decimal"
+            return f"{parts[0]} simplifies to {_say_fraction(fr)}, which is {decimal(fr)} as a decimal"
+        proper = f", or {fr.numerator} over {fr.denominator}" if abs(fr) > 1 and fr.denominator != 1 else ""
+        return f"{parts[0]} is {_say_fraction(fr)} as a fraction{proper}"
+    result = _parse_fraction(parts[0])
+    words = {"+": "plus", "-": "minus", "*": "times", "/": "divided by"}
+    try:
+        for op, operand in zip(parts[1::2], parts[2::2]):
+            other = _parse_fraction(operand)
+            if result is None or other is None:
+                return "Sorry, I could not read those fractions"
+            result = (result + other if op == "+" else result - other if op == "-"
+                      else result * other if op == "*" else result / other)
+    except ZeroDivisionError:
+        return "You cannot divide by zero"
+    sentence = " ".join(words.get(p, p) for p in parts)
+    text = f"{sentence} is {_say_fraction(result)}"
+    return text + (f", which is {decimal(result)} as a decimal" if result.denominator != 1 else "")
+
+
+def _factorize(n: int) -> dict:
+    factors, d = {}, 2
+    while d * d <= n:
+        while n % d == 0:
+            factors[d] = factors.get(d, 0) + 1
+            n //= d
+        d += 1 if d == 2 else 2
+    if n > 1:
+        factors[n] = factors.get(n, 0) + 1
+    return factors
+
+
+def number_theory(numbers: str = "", kind: str = "factors") -> str:
+    """Prime check and prime factors of one number, or the greatest common divisor / least common multiple."""
+    values = [int(abs(x)) for x in _floats(numbers) if x == int(x)]
+    if not values:
+        return "Tell me a whole number"
+    low = str(kind or "").lower()
+    if re.search(r"gcd|greatest|highest|common (?:divisor|factor)", low) or re.search(r"lcm|least|lowest|common multiple", low):
+        if len(values) < 2:
+            return "Give me at least two numbers"
+        values = values[:8]
+        if max(values) > 10 ** 18:
+            return "Those numbers are too big for me"
+        if re.search(r"lcm|least|lowest|multiple", low):
+            return f"The least common multiple of {_and_join([str(v) for v in values])} is {_num(math.lcm(*values))}"
+        return f"The greatest common divisor of {_and_join([str(v) for v in values])} is {_num(math.gcd(*values))}"
+    n = values[0]
+    if n < 2:
+        return f"{n} is neither prime nor composite"
+    if n > 10 ** 12:
+        return "That number is too big for me to factor"
+    factors = _factorize(n)
+    if factors == {n: 1}:
+        text = f"{_num(n)} is a prime number"
+        if n < 10 ** 9:
+            nxt = n + 1
+            while _factorize(nxt) != {nxt: 1}:
+                nxt += 1
+            text += f". The next prime is {_num(nxt)}"
+        return text
+    spoken = " times ".join(" times ".join([str(p)] * e) for p, e in sorted(factors.items()))
+    divisors = math.prod(e + 1 for e in factors.values())
+    return f"{_num(n)} is not prime. Its prime factors are {spoken}, and it has {divisors} divisors"
+
+
+def _quad_coeffs(text: str):
+    """(a, b, c) from '2x^2 - 4x + 1 = 0', or None."""
+    s = re.sub(r"\s+", "", str(text or "").lower().replace("²", "^2").replace("−", "-")).split("=")[0]
+    coeffs = {2: 0.0, 1: 0.0, 0: 0.0}
+    for m in re.finditer(r"([+-]?)(\d*\.?\d*)(x(?:\^(\d))?)?", s):
+        if not m.group(0):
+            continue
+        power = 0 if not m.group(3) else int(m.group(4)) if m.group(4) else 1
+        if power not in coeffs or (not m.group(2) and not m.group(3)):
+            return None
+        number = float(m.group(2)) if m.group(2) not in ("", ".") else 1.0
+        coeffs[power] += -number if m.group(1) == "-" else number
+    return coeffs[2], coeffs[1], coeffs[0]
+
+
+def quadratic_solver(a: str = "", b: str = "", c: str = "") -> str:
+    """Solve a x squared plus b x plus c equals zero. Also reads an equation like '2x^2 - 4x + 1'."""
+    if "x" in str(a or "").lower() and not str(b or "").strip() and not str(c or "").strip():
+        found = _quad_coeffs(a)
+        if found is None:
+            return "Sorry, I could not read that equation"
+        qa, qb, qc = found
+    else:
+        qa = _first_float(a)
+        if qa is None:
+            return "Tell me the three numbers a, b and c of a x squared plus b x plus c"
+        qb, qc = _first_float(b, 0.0), _first_float(c, 0.0)
+    if qa == 0:
+        if qb == 0:
+            return "That is not an equation I can solve"
+        return f"That is not quadratic, it is a straight line, x equals {_neg(-qc / qb)}"
+    disc = qb * qb - 4 * qa * qc
+    if disc > 0:
+        r1, r2 = (-qb + math.sqrt(disc)) / (2 * qa), (-qb - math.sqrt(disc)) / (2 * qa)
+        return f"There are two solutions, x equals {_neg(r1)} or x equals {_neg(r2)}. The discriminant is {_neg(disc)}"
+    if disc == 0:
+        return f"There is one solution, x equals {_neg(-qb / (2 * qa))}, a double root"
+    real, imag = -qb / (2 * qa), math.sqrt(-disc) / (2 * abs(qa))
+    return (f"There are no real solutions. The complex solutions are {_neg(real)} plus {_short(imag)} i "
+            f"and {_neg(real)} minus {_short(imag)} i")
+
+
+def _len_unit(text: str) -> str:
+    m = re.search(r"\b(millimet\w*|mm|centimet\w*|cm|kilomet\w*|km|met(?:er|re)s?|m|inch(?:es)?|in|feet|foot|ft|yards?|yd|miles?|mi)\b",
+                  str(text or "").lower())
+    if not m:
+        return ""
+    word = m.group(1)
+    for starts, name in (("milli", "millimeters"), ("mm", "millimeters"), ("centi", "centimeters"), ("cm", "centimeters"),
+                         ("kilo", "kilometers"), ("km", "kilometers"), ("met", "meters"), ("m", "meters"),
+                         ("inch", "inches"), ("in", "inches"), ("f", "feet"), ("y", "yards"), ("mi", "miles")):
+        if word.startswith(starts):
+            return name
+    return ""
+
+
+def shape_calculator(shape: str = "", dimensions: str = "") -> str:
+    """Area, perimeter, volume and surface of a circle, square, rectangle, triangle, sphere, cube, box, cylinder or cone."""
+    text = f"{shape} {dimensions}".lower()
+    nums = [abs(x) for x in (_floats(dimensions) or _floats(shape))]
+    unit = _len_unit(text)
+    sq, cu, ln = (f"square {unit}", f"cubic {unit}", unit) if unit else ("square units", "cubic units", "units")
+    kind = next((k for k in ("sphere", "cylinder", "cone", "cube", "cuboid", "box", "circle", "triangle", "square",
+                             "rectangle") if k in text), None)
+    if kind is None:
+        return "I know circles, squares, rectangles, triangles, spheres, cubes, boxes, cylinders and cones"
+    need = {"sphere": 1, "cube": 1, "circle": 1, "square": 1, "cylinder": 2, "cone": 2, "rectangle": 2,
+            "triangle": 2, "box": 3, "cuboid": 3}[kind]
+    if len(nums) < need or any(x == 0 for x in nums[:need]):
+        return f"For a {kind} I need {need} measurement{'s' if need > 1 else ''}, and they must be above zero"
+    pi = math.pi
+    if kind == "circle":
+        r = nums[0] / 2 if "diameter" in text else nums[0]
+        return f"A circle with radius {_short(r)} has an area of {_short(pi * r * r)} {sq} and a circumference of {_short(2 * pi * r)} {ln}"
+    if kind == "square":
+        s = nums[0]
+        return f"A square with side {_short(s)} has an area of {_short(s * s)} {sq}, a perimeter of {_short(4 * s)} {ln} and a diagonal of {_short(s * math.sqrt(2))} {ln}"
+    if kind == "rectangle":
+        w, h = nums[0], nums[1]
+        return (f"A rectangle of {_short(w)} by {_short(h)} has an area of {_short(w * h)} {sq}, a perimeter of "
+                f"{_short(2 * (w + h))} {ln} and a diagonal of {_short(math.hypot(w, h))} {ln}")
+    if kind == "triangle":
+        if len(nums) >= 3 and not re.search(r"\b(base|height)\b", text):
+            x, y, z = nums[:3]
+            if x + y <= z or x + z <= y or y + z <= x:
+                return "Those three sides cannot make a triangle"
+            p = (x + y + z) / 2
+            return (f"A triangle with sides {_short(x)}, {_short(y)} and {_short(z)} has an area of "
+                    f"{_short(math.sqrt(p * (p - x) * (p - y) * (p - z)))} {sq} and a perimeter of {_short(x + y + z)} {ln}")
+        return f"A triangle with base {_short(nums[0])} and height {_short(nums[1])} has an area of {_short(nums[0] * nums[1] / 2)} {sq}"
+    if kind == "sphere":
+        r = nums[0] / 2 if "diameter" in text else nums[0]
+        return f"A sphere with radius {_short(r)} has a volume of {_short(4 / 3 * pi * r ** 3)} {cu} and a surface of {_short(4 * pi * r * r)} {sq}"
+    if kind == "cube":
+        s = nums[0]
+        return f"A cube with side {_short(s)} has a volume of {_short(s ** 3)} {cu} and a surface of {_short(6 * s * s)} {sq}"
+    if kind in ("box", "cuboid"):
+        x, y, z = nums[:3]
+        return f"A box of {_short(x)} by {_short(y)} by {_short(z)} has a volume of {_short(x * y * z)} {cu} and a surface of {_short(2 * (x * y + y * z + x * z))} {sq}"
+    r, h = nums[0], nums[1]
+    if kind == "cylinder":
+        return f"A cylinder with radius {_short(r)} and height {_short(h)} has a volume of {_short(pi * r * r * h)} {cu} and a surface of {_short(2 * pi * r * (r + h))} {sq}"
+    slant = math.hypot(r, h)
+    return f"A cone with radius {_short(r)} and height {_short(h)} has a volume of {_short(pi * r * r * h / 3)} {cu} and a surface of {_short(pi * r * (r + slant))} {sq}"
+
+
+_holiday_cache = {}
+
+
+def _holiday_dates(code: str, years) -> set:
+    """Public holidays (nationwide ones) as ISO date strings; empty when they cannot be fetched."""
+    out = set()
+    for y in years:
+        if (code, y) not in _holiday_cache:
+            data = _get(f"https://date.nager.at/api/v3/PublicHolidays/{y}/{code}")
+            _holiday_cache[(code, y)] = ({h["date"] for h in data if isinstance(h, dict) and h.get("date")
+                                          and (h.get("global", True) or not h.get("counties"))} if isinstance(data, list) else None)
+        out |= _holiday_cache[(code, y)] or set()
+    return out
+
+
+def working_days(start: str = "today", until: str = "", days: str = "", country: str = "") -> str:
+    """Count working days until a date, or find the date N working days from a start (weekends and public holidays skipped)."""
+    first = _when_parse(start or "today")[0]
+    if first is None:
+        return "Sorry, I did not understand the start date"
+    code = _country_code(country)
+    if not code:
+        return f"I do not know the country {country}"
+    if str(until or "").strip():
+        last = _when_parse(until)[0]
+        if last is None:
+            return "Sorry, I did not understand the end date"
+        a, b = sorted((first, last))
+        if (b - a).days > 3650:
+            return "That is too far apart for me"
+        holidays = _holiday_dates(code, range(a.year, b.year + 1))
+        count, d = 0, a
+        while d < b:
+            d += timedelta(days=1)
+            if d.weekday() < 5 and d.isoformat() not in holidays:
+                count += 1
+        note = "weekends and public holidays" if holidays else "weekends"
+        return f"There are {count} working days from {_fmt_date(a, False)} until {_fmt_date(b, False)}, not counting {note}"
+    n = _first_float(days)
+    if n is None or n != int(n) or not 0 < abs(n) <= 2000:
+        return "Tell me an end date, or how many working days to count"
+    step, left = (1 if n > 0 else -1), int(abs(n))
+    holidays = _holiday_dates(code, range(first.year - (step < 0), first.year + 6))
+    d = first
+    for _ in range(40000):
+        if left == 0:
+            break
+        d += timedelta(days=step)
+        if d.weekday() < 5 and d.isoformat() not in holidays:
+            left -= 1
+    return f"{int(abs(n))} working days {'after' if step > 0 else 'before'} {_fmt_date(first, False)} is {_fmt_date(d)}, {d.year}"
+
+
+_FUEL_NAMES = {"l100": "liters per 100 kilometers", "kpl": "kilometers per liter",
+               "mpg_us": "US miles per gallon", "mpg_uk": "British miles per gallon"}
+
+
+def _fuel_kind(text: str):
+    low = str(text or "").lower()
+    if re.search(r"(?:l|liters?|litres?)\s*(?:/|per)\s*100|100\s*km", low):
+        return "l100"
+    if re.search(r"km\s*/\s*l|kilomet\w+ per (?:liter|litre)|kpl|km per l", low):
+        return "kpl"
+    if re.search(r"mpg|miles per gallon|mi\s*/\s*gal", low):
+        return "mpg_uk" if re.search(r"\buk\b|imperial|british", low) else "mpg_us"
+    return None
+
+
+def fuel_economy(value: str = "", from_unit: str = "", to_unit: str = "") -> str:
+    """Convert fuel economy between liters per 100 kilometers, kilometers per liter and miles per gallon."""
+    amount = _first_float(value)
+    src = _fuel_kind(from_unit) or _fuel_kind(value)
+    if amount is None or amount <= 0 or not src:
+        return "Tell me the number and its unit, like 6.5 liters per 100 kilometers or 35 mpg"
+    dst = _fuel_kind(to_unit) or ("mpg_us" if src == "l100" else "l100")
+    if dst == src:
+        return f"That is already in {_FUEL_NAMES[src]}"
+    per_100 = {"l100": amount, "kpl": 100 / amount, "mpg_us": 235.214583 / amount, "mpg_uk": 282.480936 / amount}[src]
+    result = {"l100": per_100, "kpl": 100 / per_100, "mpg_us": 235.214583 / per_100, "mpg_uk": 282.480936 / per_100}[dst]
+    return f"{_short(amount)} {_FUEL_NAMES[src]} is about {_short(result)} {_FUEL_NAMES[dst]}"
+
+
+# ---- tech and DIY --------------------------------------------------------------
+def subnet_calculator(network: str = "") -> str:
+    """Network, mask, broadcast and usable hosts of 192.168.1.0/24, or the subnet that fits N hosts."""
+    text = " ".join(str(network or "").lower().split())
+    if not text:
+        return "Tell me a network like 192.168.1.0/24, or how many hosts you need"
+    hosts = re.fullmatch(r"(?:for\s+)?(\d+)\s*(?:hosts?|devices?|computers?|machines?|addresses)?", text)
+    if hosts and "." not in text:
+        n = int(hosts.group(1))
+        if not 1 <= n <= 2 ** 24 - 2:
+            return "I can size a network for 1 to about 16 million hosts"
+        prefix = 32 - max(2, math.ceil(math.log2(n + 2)))
+        net = ipaddress.ip_network(f"10.0.0.0/{prefix}")
+        return (f"For {n} hosts you need a slash {prefix} network, mask {net.netmask}, "
+                f"which gives {_num(net.num_addresses - 2)} usable addresses")
+    text = re.sub(r"\s*(?:/|\bslash\b)\s*", "/", text)
+    text = re.sub(r"\s+(?=\d+\.\d+\.\d+\.\d+$)", "/", text)
+    if "/" not in text:
+        return "Tell me the mask too, like 192.168.1.10/24 or 192.168.1.10 255.255.255.0"
+    try:
+        iface = ipaddress.ip_interface(text)
+    except ValueError:
+        return "I could not read that network. Try 192.168.1.0/24"
+    net = iface.network
+    lead = f"The address {iface.ip} sits in the network {net}. " if iface.ip != net.network_address else ""
+    if net.version == 6:
+        return f"{lead}{net} has {_num(net.num_addresses)} addresses"
+    if net.prefixlen == 32:
+        return f"{net} is a single address"
+    if net.prefixlen == 31:
+        return f"{lead}{net} holds two addresses, {net[0]} and {net[1]}, used for point to point links"
+    return (f"{lead}{net} has {_num(net.num_addresses - 2)} usable addresses. Network address {net.network_address}, "
+            f"mask {net.netmask}, broadcast {net.broadcast_address}, hosts from {net[1]} to {net[-2]}")
+
+
+_LED_VF = {"red": 2.0, "orange": 2.0, "yellow": 2.1, "green": 2.2, "blue": 3.2, "white": 3.2, "pink": 3.2,
+           "purple": 3.2, "infrared": 1.3, "ir": 1.3}
+
+
+_E12 = (1.0, 1.2, 1.5, 1.8, 2.2, 2.7, 3.3, 3.9, 4.7, 5.6, 6.8, 8.2)
+
+
+def _std_resistor(ohms: float) -> float:
+    """The smallest standard (E12) resistor at or above a value."""
+    if ohms <= 0:
+        return 1.0
+    exp = math.floor(math.log10(ohms))
+    for k in (exp, exp + 1):
+        for base in _E12:
+            value = round(base * 10 ** k, 6)
+            if value >= ohms - 1e-9:
+                return value
+    return ohms
+
+
+def led_resistor(supply_voltage: str = "", led_voltage: str = "red", current: str = "20 mA") -> str:
+    """The series resistor for an LED: the minimum value, the next standard one and its power."""
+    vs = _si_value(supply_voltage)
+    if vs is None or vs <= 0:
+        return "Tell me the supply voltage, like 5 volts"
+    word = next((k for k in _LED_VF if re.search(rf"\b{k}\b", str(led_voltage or "").lower())), None)
+    vf = _LED_VF[word] if word else (_si_value(led_voltage) if str(led_voltage or "").strip() else 2.0)
+    if vf is None or vf <= 0:
+        return "Tell me the LED color or its forward voltage, like red or 2 volts"
+    amps = _si_value(current or "20 mA")
+    if amps is not None and not re.search(r"[a-zA-Zµ]", str(current)):
+        amps /= 1000            # a bare number means milliamps
+    if amps is None or amps <= 0:
+        return "Tell me the LED current, like 20 milliamps"
+    if vs <= vf:
+        return f"The supply voltage must be higher than the LED voltage of {_short(vf)} volts"
+    exact = (vs - vf) / amps
+    std = _std_resistor(exact)
+    real = (vs - vf) / std
+    power = real * real * std
+    size = "a quarter watt resistor is fine" if power <= 0.25 else "use a half watt resistor" if power <= 0.5 else "use a resistor rated above one watt" if power > 1 else "use a one watt resistor"
+    return (f"You need at least {_ohms_text(exact)}. The next standard value is {_ohms_text(std)}, which gives "
+            f"{_eng(real, 'amps')} and heats up with {_eng(power, 'watts')}, {size}")
+
+
+_DIGIT_COLORS = ["black", "brown", "red", "orange", "yellow", "green", "blue", "violet", "grey", "white"]
+_COLOR_DIGIT = {**{c: i for i, c in enumerate(_DIGIT_COLORS)}, "purple": 7, "gray": 8}
+_COLOR_TOL = {"brown": 1, "red": 2, "green": 0.5, "blue": 0.25, "violet": 0.1, "purple": 0.1, "grey": 0.05,
+              "gray": 0.05, "gold": 5, "silver": 10}
+
+
+def resistor_code(bands: str = "") -> str:
+    """Resistor color bands to a value, or a value to its color bands."""
+    low = str(bands or "").lower()
+    colors = re.findall(r"\b(?:black|brown|red|orange|yellow|green|blue|violet|purple|grey|gray|white|gold|silver)\b", low)
+    if len(colors) >= 3:
+        colors = colors[:5]
+        digits = 3 if len(colors) == 5 else 2
+        if len(colors) < digits + 1 or any(c not in _COLOR_DIGIT for c in colors[:digits]):
+            return "I could not read those bands. The first bands must be black, brown, red, orange, yellow, green, blue, violet, grey or white"
+        mult = colors[digits]
+        factor = 10 ** _COLOR_DIGIT[mult] if mult in _COLOR_DIGIT else 0.1 if mult == "gold" else 0.01
+        value = int("".join(str(_COLOR_DIGIT[c]) for c in colors[:digits])) * factor
+        tol = _COLOR_TOL.get(colors[digits + 1], None) if len(colors) > digits + 1 else 20
+        if tol is None:
+            return "I did not understand the tolerance band"
+        return f"{', '.join(colors)} is {_ohms_text(value)}, plus or minus {_num(tol)} percent"
+    found = re.search(r"\d+(?:\.\d+)?\s*[a-zµ]*", low)
+    value = _si_value(found.group(0)) if found else None
+    if value is None or value <= 0:
+        return "Tell me the color bands, like brown black red gold, or a value like 4.7 kilo ohms"
+    exp = math.floor(math.log10(value)) - 1
+    digits = round(value / 10 ** exp)
+    if digits >= 100:
+        digits, exp = digits // 10, exp + 1
+    if exp < -2 or exp > 9:
+        return "That value is outside what the color code can show"
+    mult = "gold" if exp == -1 else "silver" if exp == -2 else _DIGIT_COLORS[exp]
+    approx = digits * 10 ** exp
+    note = f". The closest value the 4 bands can show is {_ohms_text(approx)}" if abs(approx - value) / value > 0.005 else ""
+    return (f"{_ohms_text(value)} is {_DIGIT_COLORS[digits // 10]}, {_DIGIT_COLORS[digits % 10]}, {mult}, "
+            f"then gold for 5 percent tolerance{note}")
+
+
+def battery_life(capacity: str = "", draw: str = "", voltage: str = "3.7") -> str:
+    """How long a battery lasts: capacity in mAh, Ah or Wh against a draw in mA, A or W."""
+    cap = re.search(r"(\d+(?:\.\d+)?)\s*(mah|ah|wh|kwh)\b", str(capacity or "").lower())
+    use = re.search(r"(\d+(?:\.\d+)?)\s*(ua|µa|ma|a|mw|w|kw)\b", str(draw or "").lower())
+    if not cap:
+        return "Tell me the battery capacity, like 2000 mAh or 10 Wh"
+    if not use:
+        return "Tell me how much the device draws, like 150 mA or 2 W"
+    volts = _first_float(voltage, 3.7)
+    value = float(cap.group(1)) * {"mah": 1.0, "ah": 1000.0, "wh": 1.0, "kwh": 1000.0}[cap.group(2)]
+    energy_cap = cap.group(2) in ("wh", "kwh")           # Wh, else mAh
+    amount = float(use.group(1)) * {"ua": 1e-3, "µa": 1e-3, "ma": 1.0, "a": 1000.0, "mw": 1e-3, "w": 1.0, "kw": 1000.0}[use.group(2)]
+    power_draw = use.group(2) in ("mw", "w", "kw")        # W, else mA
+    if amount <= 0 or not volts or volts <= 0:
+        return "That draw does not look right"
+    if energy_cap == power_draw:
+        hours = value / amount
+    elif energy_cap:                                        # Wh against a current in mA
+        hours = value / (amount / 1000 * volts)
+    else:                                                    # mAh against a power in W
+        hours = value / (amount / volts * 1000)
+    seconds = hours * 3600
+    if seconds > 10 * 365 * 86400:
+        return "That would last more than ten years, the battery would age before it runs out"
+    return (f"In theory the battery lasts about {_spoken_duration(seconds)}. With 80 percent usable capacity, "
+            f"which is more realistic, about {_spoken_duration(seconds * 0.8)}")
+
+
+def unix_time(value: str = "") -> str:
+    """Unix timestamp to a date, a date to a timestamp, or the current timestamp."""
+    raw = str(value or "").strip()
+    if raw.lower() in ("", "now", "current", "right now"):
+        return f"The current Unix time is {int(time.time())}"
+    plain = raw.replace(",", "").replace(" ", "")
+    if re.fullmatch(r"-?\d{1,14}(?:\.\d+)?", plain):
+        stamp = float(plain)
+        millis = abs(stamp) >= 1e11
+        try:
+            utc = datetime.fromtimestamp(stamp / 1000 if millis else stamp, timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return "That timestamp is out of range"
+        local = utc.astimezone()
+        text = f"{plain} is {_fmt_date(utc.date())}, {utc.year}, {_clock(utc.hour, utc.minute)} UTC"
+        if local.utcoffset() != timedelta(0):
+            text += f", {_clock(local.hour, local.minute)} your time"
+        return text + (", reading it as milliseconds" if millis else "")
+    moment = None
+    try:
+        moment = datetime.fromisoformat(re.sub(r"[zZ]$", "+00:00", raw))
+    except ValueError:
+        d, at = _when_parse(raw)
+        if d is not None:
+            moment = datetime(d.year, d.month, d.day, *(at or (0, 0)))
+    if moment is None:
+        return "Tell me a Unix timestamp or a date, like 2027-01-01"
+    naive = moment.tzinfo is None
+    moment = moment.replace(tzinfo=timezone.utc) if naive else moment
+    return f"{raw} is Unix time {int(moment.timestamp())}" + (", reading it as UTC" if naive else "")
+
+
+_MORE_SPECS4 = [
+    _tool("what_to_wear", "What to wear, from the day's forecast: layers, rain gear, wind, sun and ice. Use for 'what should I wear today', "
+          "'do I need a jacket', 'what do I wear tomorrow in Berlin'.",
+          {"location": _text("City, e.g. 'Prague'. Leave empty for the home city."),
+           "day": _text("Which day, e.g. 'today'. Also 'tomorrow', 'Friday', 'in 3 days'.")}),
+    _tool("clock_change", "When the clocks next change for daylight saving time. Use for 'when do the clocks change', "
+          "'is it summer time soon', 'do we lose an hour of sleep'.",
+          {"country": _text("Country, e.g. 'Germany'. Leave empty for the home country.")}),
+    _tool("long_weekends", "The next long weekends of a country, and whether a bridge day is needed. Use for 'when is the next long "
+          "weekend', 'plan a trip around the holidays', 'which days off are coming'.",
+          {"country": _text("Country, e.g. 'Czech Republic'. Leave empty for the home country."),
+           "year": _text("Optional year, e.g. '2027'. Leave empty for the coming ones.")}),
+    _tool("time_until", "How long it is until a clock time today or tomorrow. Use for 'how long until 6 PM', 'how many hours until noon', "
+          "'how long till my meeting at 3'.",
+          {"clock": _text("The clock time, e.g. '6 PM'. Also 'noon', '18:30', 'tomorrow at 7'.")}, ["clock"]),
+    _tool("ip_lookup", "Where an IP address or a website is hosted (country, city) and which company runs the network. Use for "
+          "'where is 8.8.8.8', 'where is github.com hosted', 'what is my IP location'.",
+          {"address": _text("IP address or website, e.g. '8.8.8.8'. Also 'github.com'. Leave empty for your own address.")}),
+    _tool("dns_lookup", "The IP addresses a website or host name points to. Use for 'what IP is example.com', 'resolve my NAS name', "
+          "'dns lookup for github.com'.",
+          {"host": _text("Website or host, e.g. 'example.com'.")}, ["host"]),
+    _tool("ssl_expiry", "Days until the HTTPS certificate of a website expires. Use for 'when does the certificate of example.com "
+          "expire', 'is the ssl of my site still valid'.",
+          {"site": _text("Website, e.g. 'example.com'.")}, ["site"]),
+    _tool("next_launch", "The next rocket launches in the world: who, what, from where and when. Use for 'when is the next rocket launch', "
+          "'is there a SpaceX launch soon', 'upcoming launches'.",
+          {"count": _text("How many launches, e.g. '1'. Up to 3.")}),
+    _tool("pomodoro", "Start focus rounds with breaks; Kate tells the user when to rest and when to start again. Use for 'start a "
+          "pomodoro', 'focus for 25 minutes then a break', 'help me study for two rounds'. Cancel with cancel_timer.",
+          {"work_minutes": _text("Minutes of focus, e.g. '25'."), "break_minutes": _text("Minutes of break, e.g. '5'."),
+           "rounds": _text("How many rounds, e.g. '1'. Up to 4.")}),
+    _tool("log_weight", "Write down the user's weight today, one weigh in per day. Use for 'I weigh 80 kilos', 'my weight today is 176 pounds', "
+          "'log my weight'.",
+          {"weight": _text("The weight, e.g. '80'. Also '176 pounds'."), "unit": _text("Optional unit, e.g. 'kilos'. Also 'pounds'.")},
+          ["weight"]),
+    _tool("weight_trend", "How the logged weight has changed. Use for 'how is my weight going', 'did I lose weight this month', "
+          "'my weight trend'.",
+          {"period": _text("'month' normally, e.g. 'month'. Also 'week', '3 months', 'year', 'all'.")}),
+    _tool("nato_alphabet", "Spell a word or name with the phonetic alphabet (Alpha, Bravo, Charlie), for the phone. Use for 'spell my "
+          "name with the phonetic alphabet', 'nato spelling of Novak'.",
+          {"text": _text("The word or name, e.g. 'Novak'.")}, ["text"]),
+    _tool("anagram_check", "Check whether two words or phrases are anagrams, or with one word whether it is a palindrome. Use for "
+          "'is listen an anagram of silent', 'is racecar a palindrome'.",
+          {"word_a": _text("First word or phrase, e.g. 'listen'."),
+           "word_b": _text("Second word or phrase, e.g. 'silent'. Leave empty to test for a palindrome.")}, ["word_a"]),
+    _tool("recipe_scaler", "Scale recipe amounts to another number of servings. Use for 'make this for 6 instead of 4', 'halve the "
+          "recipe', 'scale 2 cups flour and 3 eggs from 4 servings to 6'.",
+          {"ingredients": _text("The amounts, e.g. '2 cups flour, 3 eggs, 1 tsp salt'."),
+           "from_servings": _text("Servings of the recipe, e.g. '4'."), "to_servings": _text("Servings wanted, e.g. '6'.")},
+          ["ingredients", "from_servings", "to_servings"]),
+    _tool("one_rep_max", "Estimate the one rep max of a lift and the working weights. Use for 'what is my one rep max', "
+          "'I benched 80 for 5 reps, what is my max'.",
+          {"weight": _text("Weight lifted, e.g. '80'. Also '176 pounds'."), "reps": _text("Reps done, e.g. '5'.")},
+          ["weight", "reps"]),
+    _tool("calories_burned", "Rough calories burned by an activity. Uses the last logged weight unless one is given. Use for "
+          "'how many calories did a 30 minute run burn', 'calories for an hour of cycling'.",
+          {"activity": _text("The activity, e.g. 'running'. Also 'walking', 'cycling', 'swimming', 'yoga'."),
+           "minutes": _text("How long, e.g. '30 minutes'. Also '1 hour'."),
+           "weight": _text("Optional weight, e.g. '80 kg'. Leave empty to use the logged weight.")},
+          ["activity", "minutes"]),
+    _tool("race_predictor", "Predict race times for other distances from one result. Use for 'if I run 5k in 25 minutes what is my "
+          "marathon time', 'predict my half marathon'.",
+          {"distance": _text("Distance of the result, e.g. '5 kilometers'. Also '10k', 'half marathon'."),
+           "time_text": _text("Time of the result, e.g. '25 minutes'. Also '1:45:00'."),
+           "target": _text("Optional distance to predict, e.g. 'marathon'. Leave empty for the usual ones.")},
+          ["distance", "time_text"]),
+    _tool("percentage_change", "Percent change from an old value to a new one. Use for 'how much did it go up from 80 to 100', "
+          "'what percent is the increase from 1200 to 1500'.",
+          {"old": _text("The old value, e.g. '80'."), "new": _text("The new value, e.g. '100'.")}, ["old", "new"]),
+    _tool("savings_goal", "Saving plans: how much to save a month for a goal, how long a monthly saving takes, or whether a plan reaches the "
+          "goal. Use for 'how much to save per month for 300000 in 5 years', 'how long to save 50000 at 2000 a month'.",
+          {"goal": _text("The goal amount, e.g. '300000'. Also '50k'."),
+           "monthly_deposit": _text("Saved each month, e.g. '2000'. Leave empty to find it."),
+           "years": _text("Years available, e.g. '5'. Also '18 months'. Leave empty to find it."),
+           "rate": _text("Yearly interest in percent, e.g. '3'. Leave empty for none."),
+           "current_savings": _text("Already saved, e.g. '10000'. Leave empty for none.")}, ["goal"]),
+    _tool("fraction_tools", "Simplify fractions, turn decimals into fractions, or add, subtract, multiply and divide fractions. Use for "
+          "'simplify 18 over 24', 'what is 0.375 as a fraction', 'what is 1/2 plus 1/3'.",
+          {"value": _text("The fraction, decimal or sum, e.g. '3/12'. Also '0.375', '1/2 + 1/3', '1 1/2 times 2/3'.")}, ["value"]),
+    _tool("number_theory", "Prime check and prime factors of a number, or the greatest common divisor or least common multiple of numbers. "
+          "Use for 'is 97 prime', 'prime factors of 360', 'gcd of 12 and 18', 'lcm of 4 and 6'.",
+          {"numbers": _text("The number or numbers, e.g. '360'. Also '12 and 18'."),
+           "kind": _text("'factors' normally, e.g. 'factors'. Also 'gcd' or 'lcm' for several numbers.")}, ["numbers"]),
+    _tool("quadratic_solver", "Solve a quadratic equation a x squared plus b x plus c equals zero. Use for 'solve x squared minus 5x plus 6', "
+          "'roots of 2x^2 - 4x + 1'.",
+          {"a": _text("The a number, e.g. '1'. Or the whole equation like '2x^2 - 4x + 1'."),
+           "b": _text("The b number, e.g. '-5'. Leave empty if a is the whole equation."),
+           "c": _text("The c number, e.g. '6'. Leave empty if a is the whole equation.")}, ["a"]),
+    _tool("shape_calculator", "Area, perimeter, volume and surface of a circle, square, rectangle, triangle, sphere, cube, box, cylinder or cone. "
+          "Use for 'area of a circle with radius 5', 'volume of a box 2 by 3 by 4 meters', 'area of a triangle with sides 3 4 5'.",
+          {"shape": _text("The shape, e.g. 'circle'. Also 'rectangle', 'triangle', 'sphere', 'cylinder', 'cone', 'box'."),
+           "dimensions": _text("The measurements, e.g. '5 meters'. Also '2 by 3 by 4', 'radius 3 height 10', 'diameter 10'.")},
+          ["shape", "dimensions"]),
+    _tool("working_days", "Count working days until a date, or find the date some working days away (weekends and public holidays skipped). "
+          "Use for 'how many working days until December 24', 'what date is 10 working days from now'.",
+          {"start": _text("Starting date, e.g. 'today'. Also 'tomorrow', 'March 3'."),
+           "until": _text("End date to count to, e.g. 'December 24'. Leave empty when counting forward by days."),
+           "days": _text("Working days to add, e.g. '10'. Negative counts back. Leave empty when an end date is given."),
+           "country": _text("Optional country for its holidays, e.g. 'Czech Republic'. Leave empty for the home country.")}),
+    _tool("fuel_economy", "Convert fuel economy between liters per 100 kilometers, kilometers per liter and miles per gallon. Use for "
+          "'6.5 liters per 100 km in mpg', 'what is 35 mpg in liters per 100'.",
+          {"value": _text("The number, e.g. '6.5'."), "from_unit": _text("Its unit, e.g. 'l/100km'. Also 'mpg', 'uk mpg', 'km/l'."),
+           "to_unit": _text("Target unit, e.g. 'mpg'. Leave empty for the usual counterpart.")}, ["value", "from_unit"]),
+    _tool("subnet_calculator", "Network address, mask, broadcast and usable hosts of an IP network, or the subnet that fits a number of hosts. "
+          "Use for 'subnet details for 192.168.1.0/24', 'what network fits 50 devices'.",
+          {"network": _text("Network, e.g. '192.168.1.0/24'. Also '192.168.1.10 255.255.255.0' or '50 hosts'.")}, ["network"]),
+    _tool("led_resistor", "The series resistor for an LED. Use for 'what resistor for a red LED on 5 volts', 'resistor for a blue LED on "
+          "3.3 volts at 10 milliamps'.",
+          {"supply_voltage": _text("Supply voltage, e.g. '5 V'. Also '3.3'."),
+           "led_voltage": _text("LED color or forward voltage, e.g. 'red'. Also 'blue', '2.1 V'."),
+           "current": _text("LED current, e.g. '20 mA'. Also '10'.")}, ["supply_voltage"]),
+    _tool("resistor_code", "Resistor color bands to a value, or a value to its color bands. Use for 'what is brown black red gold', "
+          "'color code for a 4.7 kilo ohm resistor'.",
+          {"bands": _text("The colors, e.g. 'brown black red gold'. Or a value like '4.7k'.")}, ["bands"]),
+    _tool("battery_life", "How long a battery lasts for a given draw. Use for 'how long will a 2000 mAh battery last at 150 mA', "
+          "'battery life of 10 Wh at 2 watts'.",
+          {"capacity": _text("Battery capacity, e.g. '2000 mAh'. Also '2 Ah', '10 Wh'."),
+           "draw": _text("What the device draws, e.g. '150 mA'. Also '2 W', '10 uA'."),
+           "voltage": _text("Battery voltage when units are mixed, e.g. '3.7'.")}, ["capacity", "draw"]),
+    _tool("unix_time", "Convert a Unix timestamp to a date, a date to a timestamp, or give the current Unix time. Use for "
+          "'what date is timestamp 1700000000', 'unix time for January 1 2027', 'what is the epoch now'.",
+          {"value": _text("A timestamp, e.g. '1700000000'. Or a date like '2027-01-01'. Leave empty for now.")}),
+]
+_EXTRA_SPECS.extend(_MORE_SPECS4)
+
+
 _DISABLED = {n.strip().lower() for n in _env("DISABLED_TOOLS").split(",") if n.strip()}
 TOOLS.extend(s for s in _EXTRA_SPECS if s["function"]["name"] not in _DISABLED)
 
@@ -5058,6 +6343,38 @@ _EXTRA_FUNCS.update({
     "statistics_summary": statistics_summary, "zodiac_sign": zodiac_sign, "ping_host": ping_host,
     "cooking_measure": cooking_measure, "download_time": download_time, "hourly_wage": hourly_wage,
 })
+_EXTRA_FUNCS.update({
+    "what_to_wear": what_to_wear,
+    "clock_change": clock_change,
+    "long_weekends": long_weekends,
+    "time_until": time_until,
+    "ip_lookup": ip_lookup,
+    "dns_lookup": dns_lookup,
+    "ssl_expiry": ssl_expiry,
+    "next_launch": next_launch,
+    "pomodoro": pomodoro,
+    "log_weight": log_weight,
+    "weight_trend": weight_trend,
+    "nato_alphabet": nato_alphabet,
+    "anagram_check": anagram_check,
+    "recipe_scaler": recipe_scaler,
+    "one_rep_max": one_rep_max,
+    "calories_burned": calories_burned,
+    "race_predictor": race_predictor,
+    "percentage_change": percentage_change,
+    "savings_goal": savings_goal,
+    "fraction_tools": fraction_tools,
+    "number_theory": number_theory,
+    "quadratic_solver": quadratic_solver,
+    "shape_calculator": shape_calculator,
+    "working_days": working_days,
+    "fuel_economy": fuel_economy,
+    "subnet_calculator": subnet_calculator,
+    "led_resistor": led_resistor,
+    "resistor_code": resistor_code,
+    "battery_life": battery_life,
+    "unix_time": unix_time,
+})
 TOOL_FUNCTIONS.update({n: f for n, f in _EXTRA_FUNCS.items() if n not in _DISABLED})
 
 # Tools that make no sense inside a scheduled automation (they are for live conversation).
@@ -5082,6 +6399,34 @@ _EXTRA_AUTOMATION_EXCLUDED |= {"password_generator", "roman_numerals", "number_t
                                "ohms_law", "paint_calculator", "morse_code", "heart_rate_zones", "water_intake",
                                "electricity_cost", "discount_calculator", "statistics_summary", "zodiac_sign",
                                "cooking_measure", "download_time", "hourly_wage"}
+# New tools: the ones that need live input or change data are not automation blocks; what_to_wear, clock_change,
+# long_weekends, ssl_expiry, next_launch and weight_trend stay schedulable.
+_EXTRA_AUTOMATION_EXCLUDED |= {
+    "time_until",
+    "ip_lookup",
+    "dns_lookup",
+    "pomodoro",
+    "log_weight",
+    "nato_alphabet",
+    "anagram_check",
+    "recipe_scaler",
+    "one_rep_max",
+    "calories_burned",
+    "race_predictor",
+    "percentage_change",
+    "savings_goal",
+    "fraction_tools",
+    "number_theory",
+    "quadratic_solver",
+    "shape_calculator",
+    "working_days",
+    "fuel_economy",
+    "subnet_calculator",
+    "led_resistor",
+    "resistor_code",
+    "battery_life",
+    "unix_time",
+}
 AUTOMATION_EXCLUDED |= _EXTRA_AUTOMATION_EXCLUDED
 
 
