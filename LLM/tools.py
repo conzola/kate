@@ -3,6 +3,7 @@ import base64
 import calendar
 import collections
 import colorsys
+import difflib
 import hashlib
 import html as _html
 import inspect
@@ -7555,6 +7556,1773 @@ def mac_vendor(mac: str = "") -> str:
     return "I could not find the maker of that address"
 
 
+# =============================================================================
+# NEWEST TOOLS (50): weather and sky, internet, knowledge, food and health
+# All of these use keyless services or plain Python. Results are written to be
+# spoken: short, no emoji, no trailing period.
+# =============================================================================
+def _n_date(text, default=None):
+    """A date the user meant, preferring the past when no year is given."""
+    low = " ".join(str(text or "").lower().replace(",", " ").split())
+    today = date.today()
+    if not low:
+        return default
+    if low in ("today", "now"):
+        return today
+    if low == "yesterday":
+        return today - timedelta(days=1)
+    m = re.search(r"(\d+)\s+days?\s+ago", low)
+    if m:
+        return today - timedelta(days=int(m.group(1)))
+    m = re.search(r"\b(\d+)\s+weeks?\s+ago", low)
+    if m:
+        return today - timedelta(weeks=int(m.group(1)))
+    m = re.search(r"\blast\s+(\w+)", low)
+    if m:
+        names = [w.lower() for w in WEEKDAYS]
+        if m.group(1)[:3] in names:
+            gap = (today.weekday() - names.index(m.group(1)[:3])) % 7 or 7
+            return today - timedelta(days=gap)
+    parsed = _parse_date(low, today)
+    if parsed and parsed > today and not re.search(r"\d{4}", low):
+        try:
+            parsed = parsed.replace(year=parsed.year - 1)
+        except ValueError:
+            pass
+    return parsed
+
+
+def _n_dims(text, default_unit="cm"):
+    """Dimensions like '3 x 4 m' or '30 x 30 cm' in metres."""
+    low = str(text or "").lower()
+    values = _floats(low)
+    if not values:
+        return []
+    if re.search(r"\bmm\b|millimet", low):
+        factor = 0.001
+    elif re.search(r"\bcm\b|centimet", low):
+        factor = 0.01
+    elif re.search(r"\b(ft|feet|foot)\b|'", low):
+        factor = 0.3048
+    elif re.search(r"\b(in|inch|inches)\b|\"", low):
+        factor = 0.0254
+    elif re.search(r"\bm\b|metre|meter", low):
+        factor = 1.0
+    else:
+        factor = {"mm": 0.001, "cm": 0.01, "m": 1.0, "in": 0.0254, "ft": 0.3048}.get(default_unit, 0.01)
+    return [v * factor for v in values]
+
+
+def _n_place_name(place):
+    return (place or {}).get("name") or "your area"
+
+
+def _n_safe_url(text):
+    url = str(text or "").strip()
+    if not url:
+        return ""
+    if "://" not in url:
+        url = "https://" + url
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return ""
+    host = parsed.hostname.lower()
+    if host in ("localhost", "127.0.0.1", "::1") or host.endswith(".local"):
+        return ""
+    try:
+        ip = ipaddress.ip_address(host)
+        if ip.is_private or ip.is_loopback or ip.is_link_local:
+            return ""
+    except ValueError:
+        pass
+    return url
+
+
+def _n_aqi_label(value):
+    for limit, label in ((20, "good"), (40, "fair"), (60, "moderate"), (80, "poor"), (100, "very poor")):
+        if value < limit:
+            return label
+    return "extremely poor"
+
+
+# ---- weather and sky --------------------------------------------------------
+def weather_on_date(location: str = "", date_text: str = "") -> str:
+    """The weather on a past date for a place."""
+    place = _geocode(location)
+    if not place:
+        return _no_place(location)
+    d = _n_date(date_text)
+    if d is None:
+        return "Tell me the date, like October 20 or yesterday"
+    today = date.today()
+    if d > today:
+        return "I can only look up past weather, not the future"
+    days_ago = (today - d).days
+    daily_fields = "weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,wind_speed_10m_max"
+    if days_ago <= 7:
+        data = _get("https://api.open-meteo.com/v1/forecast",
+                    {"latitude": place["latitude"], "longitude": place["longitude"], "timezone": "auto",
+                     "forecast_days": 1, "past_days": max(1, days_ago), "daily": daily_fields})
+    else:
+        data = _get("https://archive-api.open-meteo.com/v1/archive",
+                    {"latitude": place["latitude"], "longitude": place["longitude"], "timezone": "auto",
+                     "start_date": d.isoformat(), "end_date": d.isoformat(), "daily": daily_fields})
+    daily = (data or {}).get("daily") or {}
+    times = daily.get("time") or []
+    if d.isoformat() not in times:
+        return f"I could not find weather for {_fmt_date(d)} in {_n_place_name(place)}"
+    i = times.index(d.isoformat())
+    try:
+        code = daily["weather_code"][i]
+        hi, lo = round(daily["temperature_2m_max"][i]), round(daily["temperature_2m_min"][i])
+        rain = daily.get("precipitation_sum", [0] * len(times))[i] or 0
+        wind = daily.get("wind_speed_10m_max", [0] * len(times))[i] or 0
+    except (KeyError, IndexError, TypeError, ValueError):
+        return f"I could not read the weather for {_fmt_date(d)}"
+    text = (f"In {_n_place_name(place)} on {_fmt_date(d)} it was {_WMO.get(code, 'mixed weather')}, "
+            f"high {hi} and low {lo} degrees Celsius")
+    if rain >= 0.2:
+        text += f", with {_num(round(rain, 1))} millimeters of precipitation"
+    if wind >= 30:
+        text += f", and wind up to {round(wind)} kilometers per hour"
+    return text
+
+
+def air_quality_forecast(location: str = "", day: str = "today") -> str:
+    """Air quality and pollen for today or tomorrow."""
+    place = _geocode(location)
+    if not place:
+        return _no_place(location)
+    target = date.today() + timedelta(days=1 if "tomorrow" in (day or "").lower() else 0)
+    data = _get("https://air-quality-api.open-meteo.com/v1/air-quality",
+                {"latitude": place["latitude"], "longitude": place["longitude"], "timezone": "auto",
+                 "forecast_days": 3,
+                 "hourly": "european_aqi,pm2_5,pm10,birch_pollen,grass_pollen,ragweed_pollen"})
+    hourly = (data or {}).get("hourly") or {}
+    times = hourly.get("time") or []
+    rows = [i for i, t in enumerate(times) if str(t).startswith(target.isoformat())]
+    aqi_values = [hourly.get("european_aqi", [None] * len(times))[i] for i in rows
+                  if hourly.get("european_aqi") and hourly["european_aqi"][i] is not None]
+    if not aqi_values:
+        return "Sorry, I could not get the air quality forecast"
+    peak = max(aqi_values)
+    text = f"{'tomorrow' if target != date.today() else 'today'} the air quality in {_n_place_name(place)} is {_n_aqi_label(peak)}, index {round(peak)}"
+    pm_values = [hourly.get("pm2_5", [None] * len(times))[i] for i in rows
+                 if hourly.get("pm2_5") and hourly["pm2_5"][i] is not None]
+    if pm_values:
+        text += f", fine dust around {round(sum(pm_values) / len(pm_values))} micrograms per cubic meter"
+    pollen = []
+    for key, label in (("birch_pollen", "birch"), ("grass_pollen", "grass"), ("ragweed_pollen", "ragweed")):
+        values = [hourly.get(key, [None] * len(times))[i] for i in rows
+                  if hourly.get(key) and hourly[key][i] is not None]
+        if values and max(values) >= 1:
+            pollen.append(f"{label} {round(max(values))}")
+    if pollen:
+        text += f". Pollen: {_join(pollen)}"
+    return text
+
+
+def _n_sun_altitude(latitude: float, longitude: float, when_utc: datetime) -> float:
+    """Approximate solar altitude in degrees (NOAA equation of time)."""
+    n = when_utc.timetuple().tm_yday
+    hour = when_utc.hour + when_utc.minute / 60 + when_utc.second / 3600
+    gamma = 2 * math.pi / 365.0 * (n - 1 + (hour - 12) / 24)
+    eqtime = 229.18 * (0.000075 + 0.001868 * math.cos(gamma) - 0.032077 * math.sin(gamma)
+                       - 0.014615 * math.cos(2 * gamma) - 0.040849 * math.sin(2 * gamma))
+    decl = (0.006918 - 0.399912 * math.cos(gamma) + 0.070257 * math.sin(gamma)
+            - 0.006758 * math.cos(2 * gamma) + 0.000907 * math.sin(2 * gamma)
+            - 0.002697 * math.cos(3 * gamma) + 0.00148 * math.sin(3 * gamma))
+    tst = hour * 60 + eqtime + 4 * longitude
+    ha = math.radians(tst / 4 - 180)
+    cos_z = (math.sin(math.radians(latitude)) * math.sin(decl)
+             + math.cos(math.radians(latitude)) * math.cos(decl) * math.cos(ha))
+    return math.degrees(math.asin(max(-1.0, min(1.0, cos_z))))
+
+
+def _n_light_window(latitude, longitude, offset, start_local, end_local, low, high):
+    """Local (start, end) intervals where the sun is between two altitudes."""
+    step = timedelta(minutes=2)
+    found, opened, t = [], None, start_local
+    while t <= end_local:
+        altitude = _n_sun_altitude(latitude, longitude, t - timedelta(seconds=offset))
+        inside = low <= altitude <= high
+        if inside and opened is None:
+            opened = t
+        elif not inside and opened is not None:
+            found.append((opened, t - step))
+            opened = None
+        t += step
+    if opened is not None:
+        found.append((opened, end_local))
+    return max(found, key=lambda pair: pair[1] - pair[0]) if found else None
+
+
+def golden_hour(location: str = "", date_text: str = "today") -> str:
+    """Morning and evening golden hour and blue hour for photography."""
+    place = _geocode(location)
+    if not place:
+        return _no_place(location)
+    d = _parse_date(date_text or "today", date.today())
+    if d is None:
+        return "Tell me a day, like today, tomorrow or Friday"
+    if not (date.today() - timedelta(days=1) <= d <= date.today() + timedelta(days=7)):
+        return "I can only do the next seven days"
+    data = _get("https://api.open-meteo.com/v1/forecast",
+                {"latitude": place["latitude"], "longitude": place["longitude"], "timezone": "auto",
+                 "start_date": d.isoformat(), "end_date": d.isoformat(), "daily": "sunrise,sunset"})
+    try:
+        rise = datetime.fromisoformat(data["daily"]["sunrise"][0])
+        sset = datetime.fromisoformat(data["daily"]["sunset"][0])
+        offset = data["utc_offset_seconds"]
+    except (TypeError, KeyError, IndexError, ValueError):
+        return "Sorry, I could not get the sun times"
+    morning = _n_light_window(place["latitude"], place["longitude"], offset,
+                              rise - timedelta(minutes=90), rise + timedelta(minutes=90), -4, 6)
+    evening = _n_light_window(place["latitude"], place["longitude"], offset,
+                              sset - timedelta(minutes=90), sset + timedelta(minutes=90), -4, 6)
+    blue_m = _n_light_window(place["latitude"], place["longitude"], offset,
+                             rise - timedelta(minutes=90), rise + timedelta(minutes=90), -6, -4)
+    blue_e = _n_light_window(place["latitude"], place["longitude"], offset,
+                             sset - timedelta(minutes=90), sset + timedelta(minutes=90), -6, -4)
+    parts = []
+    if morning:
+        parts.append(f"morning {_clock(morning[0].hour, morning[0].minute)} to {_clock(morning[1].hour, morning[1].minute)}")
+    if evening:
+        parts.append(f"evening {_clock(evening[0].hour, evening[0].minute)} to {_clock(evening[1].hour, evening[1].minute)}")
+    if blue_m:
+        parts.append(f"blue hour before sunrise {_clock(blue_m[0].hour, blue_m[0].minute)} to {_clock(blue_m[1].hour, blue_m[1].minute)}")
+    if blue_e:
+        parts.append(f"blue hour after sunset {_clock(blue_e[0].hour, blue_e[0].minute)} to {_clock(blue_e[1].hour, blue_e[1].minute)}")
+    if not parts:
+        return f"The sun stays too low or too high for a golden hour in {_n_place_name(place)} that day"
+    return f"Golden hour in {_n_place_name(place)} on {_fmt_date(d)}: " + "; ".join(parts)
+
+
+def aurora_forecast(location: str = "") -> str:
+    """Current Kp index and whether aurora could reach the user's latitude."""
+    place = _geocode(location)
+    if not place:
+        return _no_place(location)
+    data = _get("https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json")
+    rows = [row for row in (data or []) if isinstance(row, dict) and row.get("Kp") is not None]
+    if not rows:   # older shape: a list of [time_tag, Kp, ...]
+        rows = [row for row in (data or []) if isinstance(row, list) and len(row) >= 2
+                and re.match(r"\d{4}-\d{2}-\d{2}", str(row[0]))]
+    if not rows:
+        return "Sorry, I could not get the aurora forecast"
+    try:
+        latest = rows[-1]
+        kp = float(latest["Kp"] if isinstance(latest, dict) else latest[1])
+    except (TypeError, ValueError):
+        return "Sorry, I could not read the aurora forecast"
+    latitude = abs(float(place.get("latitude") or 0))
+    needed = 9 if latitude < 40 else 8 if latitude < 45 else 7 if latitude < 50 else 6 if latitude < 55 else 5 if latitude < 60 else 3
+    where = f"{_n_place_name(place)}, {round(latitude)} degrees north"
+    if latitude < 0:
+        where = f"{_n_place_name(place)}, {round(latitude)} degrees south"
+    if kp >= needed:
+        return (f"The Kp index is {_num(round(kp, 1))}. At {where}, aurora could be visible low on the "
+                f"{'northern' if latitude >= 0 else 'southern'} horizon if the sky is clear and dark")
+    return (f"The Kp index is {_num(round(kp, 1))}. At {where}, aurora would need about Kp {needed}, "
+            f"so it is unlikely tonight")
+
+
+# ---- a very small ephemeris for sky_tonight ---------------------------------
+_N_ORB = {
+    "mercury": (48.3313, 3.24587e-5, 7.0047, 5.00e-8, 29.1241, 1.01444e-5, 0.387098, 0.0,
+                0.205635, 5.59e-10, 168.6562, 4.0923344368),
+    "venus": (76.6799, 2.46590e-5, 3.3946, 2.75e-8, 54.8910, 1.38374e-5, 0.723330, 0.0,
+              0.006773, -1.302e-9, 48.0052, 1.6021302244),
+    "earth": (0.0, 0.0, 0.0, 0.0, 282.9404, 4.70935e-5, 1.0, 0.0,
+              0.016709, -1.151e-9, 356.0470, 0.9856002585),
+    "mars": (49.5574, 2.11081e-5, 1.8497, -1.78e-8, 286.5016, 2.92961e-5, 1.523688, 0.0,
+             0.093405, 2.516e-9, 18.6021, 0.5240207766),
+    "jupiter": (100.4542, 2.76854e-5, 1.3030, -1.557e-7, 273.8777, 1.64505e-5, 5.20256, 0.0,
+                0.048498, 4.469e-9, 19.8950, 0.0830853001),
+    "saturn": (113.6634, 2.38980e-5, 2.4886, -1.081e-7, 339.3939, 2.97661e-5, 9.55475, 0.0,
+               0.055546, -9.499e-9, 316.9670, 0.0334442282),
+    "uranus": (74.0005, 1.3978e-5, 0.7733, 1.9e-8, 96.6612, 3.0565e-5, 19.18171, -1.55e-8,
+               0.047318, 7.45e-9, 142.5905, 0.011725806),
+    "neptune": (131.7806, 3.0173e-5, 1.7700, -2.55e-7, 272.8461, -6.027e-6, 30.05826, 3.313e-8,
+                0.008606, 2.15e-9, 260.2471, 0.005995147),
+}
+
+
+def _n_days_since_2000(when_utc: datetime) -> float:
+    if when_utc.tzinfo is None:
+        when_utc = when_utc.replace(tzinfo=timezone.utc)
+    return (when_utc - datetime(1999, 12, 31, tzinfo=timezone.utc)).total_seconds() / 86400
+
+
+def _n_orbital(name: str, d: float):
+    """Heliocentric ecliptic coordinates in AU (Schlyter's low precision elements)."""
+    n0, nd, i0, id_, w0, wd, a0, ad, e0, ed, m0, md = _N_ORB[name]
+    n = math.radians((n0 + nd * d) % 360)
+    i = math.radians(i0 + id_ * d)
+    w = math.radians(w0 + wd * d)
+    a = a0 + ad * d
+    e = e0 + ed * d
+    mean = math.radians((m0 + md * d) % 360)
+    eccentric = mean
+    for _ in range(8):
+        eccentric -= (eccentric - e * math.sin(eccentric) - mean) / (1 - e * math.cos(eccentric))
+    xv = a * (math.cos(eccentric) - e)
+    yv = a * math.sqrt(max(0.0, 1 - e * e)) * math.sin(eccentric)
+    true_anomaly = math.atan2(yv, xv)
+    radius = math.hypot(xv, yv)
+    vw = true_anomaly + w
+    x = radius * (math.cos(n) * math.cos(vw) - math.sin(n) * math.sin(vw) * math.cos(i))
+    y = radius * (math.sin(n) * math.cos(vw) + math.cos(n) * math.sin(vw) * math.cos(i))
+    z = radius * (math.sin(vw) * math.sin(i))
+    return x, y, z
+
+
+def _n_ra_dec(x: float, y: float, z: float, d: float):
+    lon = math.atan2(y, x)
+    lat = math.atan2(z, math.hypot(x, y))
+    eps = math.radians(23.4393 - 3.563e-7 * d)
+    ra = math.atan2(math.sin(lon) * math.cos(eps) - math.tan(lat) * math.sin(eps), math.cos(lon))
+    dec = math.asin(max(-1.0, min(1.0, math.sin(lat) * math.cos(eps)
+                                 + math.cos(lat) * math.sin(eps) * math.sin(lon))))
+    return math.degrees(ra) % 360, math.degrees(dec)
+
+
+def _n_alt_az(ra: float, dec: float, latitude: float, longitude: float, when_utc: datetime, d: float):
+    mean = 356.0470 + 0.9856002585 * d
+    peri = 282.9404 + 4.70935e-5 * d
+    gmst0 = (mean + peri + 180) % 360
+    ut = when_utc.hour + when_utc.minute / 60 + when_utc.second / 3600
+    sidereal = (gmst0 + ut * 15 + longitude) % 360
+    hour_angle = math.radians((sidereal - ra) % 360)
+    lat_r, dec_r = math.radians(latitude), math.radians(dec)
+    altitude = math.asin(max(-1.0, min(1.0, math.sin(lat_r) * math.sin(dec_r)
+                                          + math.cos(lat_r) * math.cos(dec_r) * math.cos(hour_angle))))
+    azimuth = math.atan2(math.sin(hour_angle),
+                         math.cos(hour_angle) * math.sin(lat_r) - math.tan(dec_r) * math.cos(lat_r))
+    return math.degrees(altitude), (math.degrees(azimuth) + 180) % 360
+
+
+def _n_compass(azimuth: float) -> str:
+    names = ("north", "north-east", "east", "south-east", "south", "south-west", "west", "north-west")
+    return names[int((azimuth + 22.5) % 360 // 45)]
+
+
+def _n_moon_now():
+    synodic = 29.530588853
+    ref = datetime(2000, 1, 6, 18, 14, tzinfo=timezone.utc)
+    age = ((datetime.now(timezone.utc) - ref).total_seconds() / 86400) % synodic
+    names = ((1.85, "new moon"), (5.54, "waxing crescent"), (9.23, "first quarter"),
+             (12.91, "waxing gibbous"), (16.61, "full moon"), (20.30, "waning gibbous"),
+             (23.99, "last quarter"), (27.68, "waning crescent"))
+    phase = next((name for limit, name in names if age < limit), "new moon")
+    lit = round((1 - math.cos(2 * math.pi * age / synodic)) / 2 * 100)
+    return phase, lit
+
+
+def sky_tonight(location: str = "") -> str:
+    """Which bright planets are visible tonight and where to look."""
+    place = _geocode(location)
+    if not place:
+        return _no_place(location)
+    data = _get("https://api.open-meteo.com/v1/forecast",
+                {"latitude": place["latitude"], "longitude": place["longitude"], "timezone": "auto",
+                 "forecast_days": 2, "daily": "sunrise,sunset"})
+    try:
+        sunset = datetime.fromisoformat(data["daily"]["sunset"][0])
+        sunrise = datetime.fromisoformat(data["daily"]["sunrise"][1])
+        offset = data.get("utc_offset_seconds", 0)
+    except (TypeError, KeyError, IndexError, ValueError):
+        return "Sorry, I could not get the sun times"
+    midnight = datetime.combine(sunset.date() + timedelta(days=1), datetime.min.time())
+    samples = sorted({sunset + timedelta(hours=1), sunset + timedelta(hours=2),
+                      sunset + timedelta(hours=3), midnight, sunrise - timedelta(hours=1)})
+    samples = [s for s in samples if sunset < s < sunrise]
+    if not samples:
+        return "Sorry, I could not work out tonight's sky"
+    best = {}
+    for sample in samples:
+        utc = sample - timedelta(seconds=offset)
+        d = _n_days_since_2000(utc)
+        earth = _n_orbital("earth", d)
+        for planet in ("mercury", "venus", "mars", "jupiter", "saturn"):
+            px, py, pz = _n_orbital(planet, d)
+            ra, dec = _n_ra_dec(px - earth[0], py - earth[1], pz - earth[2], d)
+            altitude, azimuth = _n_alt_az(ra, dec, place["latitude"], place["longitude"], utc, d)
+            if altitude > 5 and (planet not in best or altitude > best[planet][0]):
+                best[planet] = (altitude, sample, azimuth)
+    phase, lit = _n_moon_now()
+    moon = f"The moon is {phase}, {lit} percent lit"
+    if not best:
+        return f"No bright planets are above the horizon tonight in {_n_place_name(place)}. {moon}"
+    ordered = sorted(best.items(), key=lambda item: item[1][0], reverse=True)[:3]
+    parts = [f"{name.title()} is {_n_compass(values[2])} around {_clock(values[1].hour, values[1].minute)}"
+             for name, values in ordered]
+    return (f"Tonight in {_n_place_name(place)}, " + "; ".join(parts)
+            + f". {moon}. Give your eyes twenty minutes to adapt to the dark")
+
+
+_N_SHOWERS = (
+    ("Quadrantids", 1, 3, "the northern sky before dawn"),
+    ("Lyrids", 4, 22, "the north-east after midnight"),
+    ("Eta Aquariids", 5, 6, "the east before dawn"),
+    ("Perseids", 8, 12, "the north-east after midnight"),
+    ("Orionids", 10, 21, "the east after midnight"),
+    ("Leonids", 11, 17, "the east after midnight"),
+    ("Geminids", 12, 14, "near the twins, all night"),
+    ("Ursids", 12, 22, "the north all night"),
+)
+
+
+def _n_moon_on(d: date):
+    synodic = 29.530588853
+    ref = datetime(2000, 1, 6, 18, 14, tzinfo=timezone.utc)
+    when = datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+    age = ((when - ref).total_seconds() / 86400) % synodic
+    return round((1 - math.cos(2 * math.pi * age / synodic)) / 2 * 100)
+
+
+def meteor_shower(when: str = "next") -> str:
+    """The next meteor shower peak and whether the moon will spoil it."""
+    today = date.today()
+    low = (when or "").lower()
+    wanted = next((name for name, *_ in _N_SHOWERS
+                   if name.lower() in low or name.lower().split()[-1].rstrip("s") in low), None)
+    upcoming = []
+    for name, month, day, where in _N_SHOWERS:
+        if wanted and name != wanted:
+            continue
+        peak = date(today.year, month, day)
+        if peak < today:
+            peak = date(today.year + 1, month, day)
+        upcoming.append((peak, name, where))
+    if not upcoming:
+        return f"I do not know a meteor shower called {when}"
+    peak, name, where = min(upcoming, key=lambda item: item[0])
+    days = (peak - today).days
+    light = _n_moon_on(peak)
+    when_text = "today" if days == 0 else "tomorrow" if days == 1 else f"in {days} days"
+    text = f"The {name} peak on {_fmt_date(peak)}, {when_text}, in {where}."
+    if light >= 60:
+        text += f" The moon is {light} percent lit, so the bright moonlight will hide the faint ones"
+    else:
+        text += f" The moon is {light} percent lit, so the sky should be dark enough"
+    return text + ". Look away from city lights and give your eyes twenty minutes"
+
+
+# ---- internet ---------------------------------------------------------------
+def reddit_top(subreddit: str = "", count: str = "5") -> str:
+    """Top posts in a subreddit today."""
+    sub = re.sub(r"[^A-Za-z0-9_+]", "", (subreddit or "").replace("r/", "")).strip() or "popular"
+    try:
+        n = max(1, min(10, int(_amount(count) or 5)))
+    except (TypeError, ValueError):
+        n = 5
+    data = _get(f"https://www.reddit.com/r/{sub}/top.json", {"limit": n, "t": "day"}, headers=_BROWSER)
+    if not data:
+        data = _get(f"https://api.reddit.com/r/{sub}/top", {"limit": n, "t": "day"}, headers=_BROWSER)
+    posts = []
+    for child in ((data or {}).get("data") or {}).get("children") or []:
+        post = child.get("data") or {}
+        title = " ".join(str(post.get("title") or "").split())
+        if title:
+            posts.append(f"{title[:130]} ({_num(post.get('score', 0))} points, {_num(post.get('num_comments', 0))} comments)")
+    if not posts:   # the JSON API is often blocked, the feed usually is not
+        try:
+            response = _req("GET", f"https://www.reddit.com/r/{sub}/top/.rss", headers=_BROWSER, timeout=12)
+            if response.status_code == 200:
+                root = ElementTree.fromstring(response.content)
+                ns = {"a": "http://www.w3.org/2005/Atom"}
+                posts = [" ".join((entry.findtext("a:title", "", ns) or "").split())[:150]
+                         for entry in root.findall("a:entry", ns)]
+                posts = [post for post in posts if post][:n]
+        except (requests.RequestException, ElementTree.ParseError):
+            posts = []
+    if not posts:
+        return f"I could not read r/{sub} right now"
+    return f"Top posts in r/{sub}: " + "; ".join(f"{i + 1}) {text}" for i, text in enumerate(posts))
+
+
+def arxiv_search(query: str = "", count: str = "3") -> str:
+    """Recent papers on a topic from arXiv."""
+    query = (query or "").strip()
+    if not query:
+        return "Tell me what topic to search for"
+    try:
+        n = max(1, min(5, int(_amount(count) or 3)))
+    except (TypeError, ValueError):
+        n = 3
+    try:
+        response = _req("GET", "https://export.arxiv.org/api/query",
+                        params={"search_query": f"all:{query}", "start": 0, "max_results": n,
+                                "sortBy": "submittedDate", "sortOrder": "descending"}, timeout=12)
+    except requests.RequestException:
+        return "Sorry, I could not reach arXiv"
+    if response.status_code != 200:
+        return "Sorry, arXiv did not answer"
+    try:
+        root = ElementTree.fromstring(response.content)
+    except ElementTree.ParseError:
+        return "Sorry, arXiv sent something I could not read"
+    ns = {"a": "http://www.w3.org/2005/Atom"}
+    papers = []
+    for entry in root.findall("a:entry", ns)[:n]:
+        title = " ".join((entry.findtext("a:title", "", ns) or "").split())
+        authors = [a.findtext("a:name", "", ns) for a in entry.findall("a:author", ns)]
+        published = (entry.findtext("a:published", "", ns) or "")[:10]
+        if title:
+            lead = authors[0] if authors else "unknown authors"
+            papers.append(f"{title[:140]} by {lead}" + (f" and others, {published}" if len(authors) > 1 else f", {published}"))
+    if not papers:
+        return f"I could not find papers about {query}"
+    return f"Recent papers on {query}: " + "; ".join(f"{i + 1}) {p}" for i, p in enumerate(papers))
+
+
+def trending_searches(country: str = "") -> str:
+    """What is trending in a country right now."""
+    code = _country_code(country) or "US"
+    try:
+        response = _req("GET", "https://trends.google.com/trending/rss", params={"geo": code.upper()}, timeout=10)
+    except requests.RequestException:
+        return "Sorry, I could not reach the trending service"
+    if response.status_code != 200:
+        return "Sorry, the trending service did not answer"
+    try:
+        root = ElementTree.fromstring(response.content)
+    except ElementTree.ParseError:
+        return "Sorry, the trending service sent something I could not read"
+    names = []
+    for item in root.iter("item"):
+        title = (item.findtext("title") or "").strip()
+        traffic = item.findtext("{https://trends.google.com/trending/rss}approx_traffic") or ""
+        if title:
+            names.append(f"{title}" + (f" ({traffic})" if traffic else ""))
+    if not names:
+        return "I could not find any trending searches"
+    return f"Trending in {code.upper()}: " + "; ".join(names[:5])
+
+
+def stackoverflow_search(query: str = "", count: str = "3") -> str:
+    """Top Stack Overflow questions for a programming problem."""
+    query = (query or "").strip()
+    if not query:
+        return "Tell me what to search for"
+    try:
+        n = max(1, min(5, int(_amount(count) or 3)))
+    except (TypeError, ValueError):
+        n = 3
+    data = _get("https://api.stackexchange.com/2.3/search/advanced",
+                {"order": "desc", "sort": "relevance", "q": query, "site": "stackoverflow",
+                 "pagesize": n, "filter": "default"})
+    items = (data or {}).get("items") or []
+    if not items:
+        return f"I could not find a Stack Overflow answer for {query}"
+    found = []
+    for item in items[:n]:
+        title = _html.unescape(re.sub(r"<[^>]+>", "", item.get("title") or "")).strip()
+        score = item.get("score", 0)
+        answers = item.get("answer_count", 0)
+        found.append(f"{title[:130]} ({_num(score)} points, {_num(answers)} answers)")
+    return f"Top Stack Overflow results: " + "; ".join(f"{i + 1}) {text}" for i, text in enumerate(found))
+
+
+def github_user(username: str = "") -> str:
+    """Profile facts for a GitHub user."""
+    name = re.sub(r"[^A-Za-z0-9-]", "", (username or "").replace("@", "")).strip()
+    if not name:
+        return "Tell me the GitHub username"
+    data = _get(f"https://api.github.com/users/{quote(name)}")
+    if not data or data.get("message"):
+        return f"I could not find the GitHub user {name}"
+    joined = (data.get("created_at") or "")[:4]
+    text = (f"{data.get('name') or data.get('login')} has {_num(data.get('public_repos', 0))} public repositories "
+            f"and {_num(data.get('followers', 0))} followers")
+    if joined:
+        text += f", on GitHub since {joined}"
+    if data.get("bio"):
+        text += f". {_first_sentences(str(data['bio']), 1, 160)}"
+    return text
+
+
+def _n_vcard_name(entity: dict) -> str:
+    vcard = entity.get("vcardArray")
+    if isinstance(vcard, list) and len(vcard) > 1:
+        for item in vcard[1]:
+            if isinstance(item, list) and len(item) >= 4 and item[0] == "fn":
+                return str(item[3]).strip()
+    return ""
+
+
+def domain_info(domain: str = "") -> str:
+    """Registrar, age, expiry and nameservers of a domain."""
+    host = _host_of(domain)
+    if not host or "." not in host:
+        return "Tell me a domain, like example.com"
+    data = _get(f"https://rdap.org/domain/{quote(host)}")
+    if not data:
+        return f"I could not look up {host}"
+    events = {}
+    for event in data.get("events") or []:
+        action, when = event.get("eventAction"), event.get("eventDate")
+        if action and when:
+            events[action] = when[:10]
+    registrar = ""
+    for entity in data.get("entities") or []:
+        if "registrar" in (entity.get("roles") or []):
+            registrar = _n_vcard_name(entity)
+            break
+    text = host
+    if registrar:
+        text += f" is registered with {registrar}"
+    registered = events.get("registration")
+    expiry = events.get("expiration")
+    if registered:
+        try:
+            years = date.today().year - date.fromisoformat(registered).year
+            text += f", created in {registered[:4]} ({years} years ago)"
+        except ValueError:
+            text += f", created in {registered[:4]}"
+    if expiry:
+        text += f", and expires on {expiry}"
+    nameservers = [str(ns.get("ldhName") or "").lower() for ns in data.get("nameservers") or [] if ns.get("ldhName")]
+    if nameservers:
+        text += f". Nameservers: {', '.join(nameservers[:3])}"
+    return text
+
+
+def link_preview(url: str = "") -> str:
+    """Title and description of a web page."""
+    target = _n_safe_url(url)
+    if not target:
+        return "Give me a web address, like example.com"
+    try:
+        response = _req("GET", target, headers=_BROWSER, timeout=10, stream=True)
+    except requests.RequestException:
+        return "Sorry, I could not open that page"
+    try:
+        if response.status_code != 200:
+            return f"That page answered with status {response.status_code}"
+        raw = b""
+        for chunk in response.iter_content(65536):
+            raw += chunk
+            if len(raw) > 500_000:
+                break
+        encoding = response.encoding or "utf-8"
+        if encoding.lower() in ("iso-8859-1", "ascii"):
+            encoding = "utf-8"
+    finally:
+        response.close()
+    page = raw.decode(encoding, errors="ignore")
+    title = ""
+    match = re.search(r"<title[^>]*>(.*?)</title>", page, flags=re.S | re.I)
+    if match:
+        title = _clean_html(match.group(1))
+    description = ""
+    for tag in re.findall(r"<meta\b[^>]*>", page, flags=re.I):
+        if re.search(r"(?:property|name)\s*=\s*[\"'](?:og:description|description|twitter:description)[\"']", tag, re.I):
+            found = re.search(r"content\s*=\s*([\"'])(.*?)\1", tag, re.I | re.S)
+            if found and len(found.group(2)) > 30:
+                description = _clean_html(found.group(2))
+                break
+    if not title and not description:
+        return "That page did not give me a title or a description"
+    host = urlparse(target).hostname or ""
+    shown = f"{title[:180]}. {description[:260]}".strip()
+    return " ".join((f"{shown} ({host})" if shown else host).split())
+
+
+# ---- knowledge and language -------------------------------------------------
+def _n_strip_wiki(text: str) -> str:
+    text = re.sub(r"<ref[^>]*>.*?</ref>", " ", text or "", flags=re.S | re.I)
+    for _ in range(4):
+        text = re.sub(r"\{\{[^{}]*\}\}", " ", text)
+        text = re.sub(r"\[\[(?:[^|\]]*\|)?([^\]]+)\]\]", r"\1", text)
+    text = re.sub(r"'''?", "", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = _html.unescape(text)
+    return " ".join(text.split())
+
+
+def word_origin(word: str = "") -> str:
+    """Where a word comes from, from Wiktionary."""
+    word = (word or "").strip().lower()
+    if not word:
+        return "Tell me which word"
+    data = _get("https://en.wiktionary.org/w/api.php",
+                {"action": "query", "prop": "extracts", "explaintext": 1, "titles": word,
+                 "format": "json", "formatversion": 2, "redirects": 1})
+    pages = ((data or {}).get("query") or {}).get("pages") or []
+    page = pages[0] if pages else {}
+    wikitext = page.get("extract") or ""
+    match = re.search(r"Etymology\s*=*\s*\n+(.*?)(?=\n=|\Z)", wikitext, flags=re.S | re.I)
+    if not match:
+        return f"I could not find the origin of {word}"
+    origin = re.sub(r"^(?:From|from)\s+", "", _n_strip_wiki(match.group(1)))
+    if not origin:
+        return f"I could not find the origin of {word}"
+    return f"{word} comes from {_first_sentences(origin, 2, 320)}"
+
+
+def pronounce_word(word: str = "") -> str:
+    """IPA, syllables and a phonetic spelling of a word."""
+    word = (word or "").strip()
+    if not word:
+        return "Tell me which word to pronounce"
+    data = _get(f"https://api.dictionaryapi.dev/api/v2/entries/en/{quote(word.lower())}")
+    if not isinstance(data, list) or not data:
+        return f"I could not find how to pronounce {word}"
+    entry = data[0]
+    phonetic = entry.get("phonetic") or ""
+    for item in entry.get("phonetics") or []:
+        if item.get("text"):
+            phonetic = item["text"]
+            break
+    syllables = max(1, len(re.findall(r"[aeiouy]+", word.lower())))
+    text = f"{word.lower()} has {syllables} {'syllable' if syllables == 1 else 'syllables'}"
+    if phonetic:
+        text += f" and is pronounced {phonetic}"
+    return text
+
+
+def acronym_expand(acronym: str = "") -> str:
+    """The most likely expansion of an acronym."""
+    acronym = (acronym or "").strip()
+    if not acronym:
+        return "Tell me the acronym"
+    data = _get("https://en.wikipedia.org/w/api.php",
+                {"action": "query", "list": "search", "srsearch": acronym, "format": "json", "srlimit": 1})
+    hits = ((data or {}).get("query") or {}).get("search") or []
+    if not hits:
+        return f"I could not find a common expansion for {acronym}"
+    title = hits[0].get("title") or acronym
+    summary = _get(f"https://en.wikipedia.org/api/rest_v1/page/summary/{quote(title.replace(' ', '_'))}")
+    extract = _clean_html((summary or {}).get("extract") or "")
+    if not extract:
+        return f"I could not find a common expansion for {acronym}"
+    if title.strip().upper() == acronym.strip().upper():
+        return f"{acronym.upper()}: {_first_sentences(extract, 1, 260)}"
+    return f"{acronym.upper()} usually means {title}. {_first_sentences(extract, 1, 260)}"
+
+
+def city_info(city: str = "") -> str:
+    """Population, elevation, timezone and coordinates of a city."""
+    place = _geocode(city)
+    if not place:
+        return _no_place(city)
+    name = place.get("name") or city
+    country = place.get("country") or ""
+    text = f"{name}{', ' + country if country else ''}"
+    population = place.get("population")
+    if isinstance(population, (int, float)) and population:
+        text += f": population {_num(round(population))}"
+    else:
+        text += ":"
+    elevation = place.get("elevation")
+    if isinstance(elevation, (int, float)):
+        text += f", elevation {_num(round(elevation))} meters"
+    if place.get("timezone"):
+        text += f", timezone {place['timezone']}"
+    if isinstance(place.get("latitude"), (int, float)):
+        lat, lon = place["latitude"], place.get("longitude", 0)
+        text += (f", at {abs(lat):.1f} degrees {'north' if lat >= 0 else 'south'}"
+                 f" and {abs(lon):.1f} degrees {'east' if lon >= 0 else 'west'}")
+    return text
+
+
+def movie_info(title: str = "") -> str:
+    """Year, director and a short plot of a film."""
+    title = (title or "").strip()
+    if not title:
+        return "Tell me which film"
+    data = _get("https://en.wikipedia.org/w/api.php",
+                {"action": "query", "list": "search", "srsearch": f"{title} film",
+                 "format": "json", "srlimit": 5})
+    hits = ((data or {}).get("query") or {}).get("search") or []
+    if not hits:
+        return f"I could not find a film called {title}"
+    low = title.lower()
+    chosen = next((hit for hit in hits
+                   if "film" in f"{hit.get('title', '')} {_clean_html(hit.get('snippet', ''))}".lower()
+                   and low in (hit.get("title") or "").lower()), hits[0])
+    page = _get("https://en.wikipedia.org/w/api.php",
+                {"action": "query", "titles": chosen.get("title") or title, "prop": "pageprops|extracts",
+                 "exintro": 1, "explaintext": 1, "format": "json", "formatversion": 2, "redirects": 1})
+    pages = ((page or {}).get("query") or {}).get("pages") or []
+    info = pages[0] if pages else {}
+    extract = (info.get("extract") or "").strip()
+    if not extract:
+        return f"I could not find a film called {title}"
+    summary = _first_sentences(" ".join(extract.split()), 2, 320)
+    if not summary.lower().startswith(low):
+        summary = f"{info.get('title') or title}: {summary}"
+    return summary
+
+
+# ---- food, health and pets --------------------------------------------------
+_N_FOOD_TEMPS = (
+    (("ground", "mince", "burger", "meatball", "sausage"), 71, 0, "ground meat"),
+    (("chicken", "turkey", "poultry", "duck", "goose"), 74, 0, "poultry"),
+    (("beef", "steak", "lamb", "veal", "pork", "roast"), 63, 3, "beef, lamb, veal or pork"),
+    (("fish", "salmon", "cod", "tuna"), 63, 0, "fish"),
+    (("leftover", "casserole", "reheat"), 74, 0, "leftovers"),
+    (("egg",), 71, 0, "eggs"),
+    (("ham", "bacon"), 63, 3, "ham or bacon"),
+)
+
+
+def food_safety_temp(food: str = "") -> str:
+    """Safe internal temperature for a food."""
+    low = (food or "").lower()
+    if not low:
+        return "Tell me the food, like chicken, beef, fish or leftovers"
+    for words, celsius, rest, label in _N_FOOD_TEMPS:
+        if any(word in low for word in words):
+            fahrenheit = round(celsius * 9 / 5 + 32)
+            text = f"{label} should reach {celsius} degrees Celsius, {fahrenheit} Fahrenheit"
+            if rest:
+                text += f", then rest for {rest} minutes"
+            return text + ". Use a meat thermometer in the thickest part"
+    return "I do not have a safe temperature for that food. Chicken is 74, ground meat 71, and whole cuts 63 degrees"
+
+
+def defrost_time(food: str = "", weight: str = "", method: str = "fridge") -> str:
+    """How long food takes to thaw, by weight and method."""
+    kilos = None
+    value = _amount(weight)
+    if value is not None:
+        low = str(weight or "").lower()
+        if re.search(r"\b(lb|lbs|pound|pounds)\b", low):
+            kilos = value * 0.45359237
+        elif re.search(r"\b(oz|ounce|ounces)\b", low):
+            kilos = value * 0.0283495
+        elif re.search(r"\b(g|gram|grams)\b", low) and not re.search(r"\bkg|kilo", low):
+            kilos = value / 1000
+        else:
+            kilos = value
+    low = (method or "fridge").lower()
+    label = (food or "the food").strip()
+    if "micro" in low:
+        return (f"For {label}, use the defrost setting and check every two minutes. "
+                "As a rough guide it takes six to eight minutes per pound, but the package is the best guide")
+    if "water" in low:
+        if kilos:
+            minutes = round(kilos * 66)
+            return (f"A {_short(kilos)} kilogram {label} takes about {minutes} minutes in cold water. "
+                    "Change the water every thirty minutes and cook it straight away")
+        return "In cold water, allow about thirty minutes per pound, and change the water every thirty minutes"
+    if kilos:
+        low_hours, high_hours = kilos * 8.8, kilos * 11
+        return (f"A {_short(kilos)} kilogram {label} takes about {_short(low_hours)} to {_short(high_hours)} hours "
+                "in the fridge. Keep it on the bottom shelf")
+    return "In the fridge, allow about four to five hours per pound, or nine to eleven hours per kilogram"
+
+
+_N_WINE = (
+    (("steak", "beef", "burger", "lamb", "venison", "barbecue"), "Cabernet Sauvignon", "Malbec"),
+    (("chicken", "turkey", "pork"), "Chardonnay", "Pinot Noir"),
+    (("fish", "salmon", "cod", "seafood", "sushi"), "Sauvignon Blanc", "Pinot Grigio"),
+    (("pasta", "pizza", "tomato"), "Chianti", "Sangiovese"),
+    (("cream", "butter", "risotto"), "Chardonnay", "Viognier"),
+    (("spicy", "curry", "thai", "indian"), "Riesling", "Gewurztraminer"),
+    (("cheese",), "white Burgundy", "Chardonnay"),
+    (("dessert", "cake", "chocolate"), "Port", "Muscat"),
+    (("vegetarian", "salad", "veggie"), "rosé", "Pinot Grigio"),
+)
+
+
+def wine_pairing(dish: str = "") -> str:
+    """A wine for a dish, with a cheaper alternative."""
+    low = (dish or "").lower()
+    if not low:
+        return "Tell me the dish, like steak, fish, pasta or a spicy curry"
+    for words, wine, cheaper in _N_WINE:
+        if any(word in low for word in words):
+            return f"With {dish.strip()}, try a {wine}. A cheaper option is {cheaper}"
+    return "For a rich meat dish try Cabernet Sauvignon, for fish Sauvignon Blanc, and for spicy food Riesling"
+
+
+_N_TEA = {
+    "green": (80, "2 to 3 minutes"),
+    "black": (95, "3 to 5 minutes"),
+    "oolong": (90, "3 to 4 minutes"),
+    "white": (85, "4 to 5 minutes"),
+    "herbal": (95, "5 to 7 minutes"),
+    "rooibos": (95, "5 to 7 minutes"),
+    "matcha": (80, "whisk for 1 to 2 minutes"),
+    "pu-erh": (95, "3 to 5 minutes"),
+}
+
+
+def tea_brew(tea: str = "") -> str:
+    """Water temperature and steeping time for a tea."""
+    low = (tea or "").lower()
+    if not low:
+        return "Tell me the tea, like green, black, oolong, white or herbal"
+    kind = next((name for name in _N_TEA if name in low), None)
+    if not kind:
+        return "I know green, black, oolong, white, herbal, rooibos, matcha and pu-erh tea"
+    celsius, time_text = _N_TEA[kind]
+    return (f"{kind.title()} tea: water at {celsius} degrees Celsius, {round(celsius * 9 / 5 + 32)} Fahrenheit, "
+            f"and steep for {time_text}")
+
+
+def blood_pressure_check(systolic: str = "", diastolic: str = "") -> str:
+    """Category for a blood pressure reading."""
+    numbers = _floats(f"{systolic} {diastolic}")
+    if len(numbers) < 2 and "/" in str(systolic):
+        numbers = _floats(str(systolic).replace("/", " "))
+    if len(numbers) < 2:
+        return "Tell me the reading as two numbers, like 120 over 80"
+    high, low = numbers[0], numbers[1]
+    if high > 180 or low > 120:
+        return ("That is a hypertensive crisis. Sit down, and contact emergency services if you have chest pain, "
+                "breathing trouble, weakness or vision changes. This is not medical advice")
+    if high >= 140 or low >= 90:
+        label = "stage 2 high blood pressure"
+    elif high >= 130 or low >= 80:
+        label = "stage 1 high blood pressure"
+    elif high >= 120:
+        label = "elevated blood pressure"
+    else:
+        label = "normal blood pressure"
+    return f"{round(high)} over {round(low)} is {label}. This is not medical advice; one reading is not a diagnosis"
+
+
+def pregnancy_due_date(last_period: str = "", conception: str = "") -> str:
+    """Estimated due date from the last period or conception."""
+    start = _n_date(last_period) if (last_period or "").strip() else None
+    offset = 280
+    label = "the first day of your last period"
+    if start is None and (conception or "").strip():
+        start = _n_date(conception)
+        offset = 266
+        label = "conception"
+    if start is None:
+        return "Tell me the first day of your last period, or the conception date"
+    if start > date.today():
+        return "That date is in the future"
+    due = start + timedelta(days=offset)
+    weeks = (date.today() - start).days // 7
+    return (f"Your due date is around {_fmt_date(due)}, {due.year}, about {weeks} weeks from {label}. "
+            "This is an estimate, not medical advice")
+
+
+def pet_food(species: str = "", weight: str = "", age: str = "", activity: str = "normal") -> str:
+    """Daily food amount for a dog or cat."""
+    low = f"{species} {age} {activity}".lower()
+    if "cat" in low:
+        kind = "cat"
+    elif "dog" in low:
+        kind = "dog"
+    else:
+        return "Tell me whether it is a dog or a cat"
+    kilos = _weight_kg(weight)
+    if kilos is None or not 0.4 <= kilos <= 90:
+        return "Tell me the pet's weight, like 20 kilos or 45 pounds"
+    puppy = "puppy" in low or "kitten" in low
+    senior = "senior" in low or "old" in low
+    loss = "loss" in low or "diet" in low or "overweight" in low
+    active = "active" in low or "working" in low
+    if kind == "dog":
+        factor = 2.5 if puppy else 1.0 if loss else 2.0 if active else 1.4 if senior else 1.6
+    else:
+        factor = 2.5 if puppy else 0.8 if loss else 1.6 if active else 1.1 if senior else 1.2
+    calories = 70 * (kilos ** 0.75) * factor
+    grams = calories / 3.5  # 350 kcal per 100 g
+    return (f"A {_short(kilos)} kilogram {kind} needs about {_num(round(calories))} calories a day, "
+            f"roughly {_num(round(grams))} grams of food at 350 calories per 100 grams. Split it into two meals "
+            "and adjust to body condition")
+
+
+# ---- building, money and travel --------------------------------------------
+def tile_calculator(room: str = "", tile: str = "", waste: str = "10") -> str:
+    """How many tiles a floor needs, including cuts and waste."""
+    room_dims = _n_dims(room, "m")
+    tile_dims = _n_dims(tile, "cm")
+    if not room_dims:
+        return "Tell me the room size, like 3 by 4 meters"
+    if not tile_dims:
+        return "Tell me the tile size, like 30 by 30 centimeters"
+    area = room_dims[0] * room_dims[1] if len(room_dims) > 1 else room_dims[0] ** 2
+    tile_area = tile_dims[0] * tile_dims[1] if len(tile_dims) > 1 else tile_dims[0] ** 2
+    if area <= 0 or tile_area <= 0:
+        return "Those measurements do not make sense"
+    extra = max(0.0, min(50.0, _first_float(waste, 10.0)))
+    count = math.ceil(area * (1 + extra / 100) / tile_area)
+    return (f"A {_short(area)} square meter floor needs about {_num(count)} tiles of "
+            f"{_short(tile_dims[0] * 100)} by {_short(tile_dims[1] * 100)} centimeters, "
+            f"including {_num(extra)} percent for cuts and waste")
+
+
+def _n_thickness(text: str):
+    """A slab thickness in metres: '10 cm', '4 inches', or a bare number (cm unless below 1)."""
+    low = str(text or "").lower()
+    value = _first_float(low)
+    if value is None:
+        return None
+    if re.search(r"\b(mm|millimet)\b", low):
+        return value / 1000
+    if re.search(r"\b(cm|centimet)\b", low):
+        return value / 100
+    if re.search(r"\b(in|inch|inches)\b|\"", low):
+        return value * 0.0254
+    if re.search(r"\b(ft|feet|foot)\b|'", low):
+        return value * 0.3048
+    if re.search(r"\b(m|metre|meter)\b", low):
+        return value
+    return value / 100 if value > 1 else value
+
+
+def concrete_calculator(length: str = "", width: str = "", thickness: str = "") -> str:
+    """Concrete volume and 25 kilogram bags for a slab."""
+    length_m = _first_float(length)
+    width_m = _first_float(width)
+    depth = _n_thickness(thickness)
+    if length_m is None or width_m is None:
+        return "Tell me the slab size, like 4 by 3 meters"
+    if not depth or depth <= 0:
+        return "Tell me the thickness, like 10 centimeters"
+    low = f"{length} {width}".lower()
+    if re.search(r"\b(ft|feet|foot)\b|'", low):
+        length_m, width_m = length_m * 0.3048, width_m * 0.3048
+    elif re.search(r"\b(in|inch|inches)\b", low):
+        length_m, width_m = length_m * 0.0254, width_m * 0.0254
+    volume = length_m * width_m * depth
+    bags = math.ceil(volume / 0.0125)
+    return (f"That slab is {_short(volume)} cubic meters of concrete, about {_num(round(volume * 2400))} kilograms. "
+            f"Buy about {_num(bags)} bags of 25 kilograms, plus a little extra for spillage")
+
+
+_N_AWG_AMPS = {-4: 380, -3: 328, -2: 283, -1: 245, 0: 211, 1: 181, 2: 158, 3: 135, 4: 118, 5: 101, 6: 89,
+               7: 73, 8: 64, 9: 55, 10: 47, 11: 41, 12: 35, 13: 32, 14: 28, 15: 22, 16: 19, 17: 16, 18: 14,
+               19: 11, 20: 9, 21: 7, 22: 6, 23: 4.7, 24: 3.5, 25: 2.7, 26: 2.2, 27: 1.7, 28: 1.4, 29: 1.2, 30: 0.86}
+
+
+def wire_gauge(gauge: str = "") -> str:
+    """Wire diameter, cross section and rough current rating for an AWG size."""
+    raw = (gauge or "").lower().replace("awg", "").replace("gauge", "").strip()
+    if not raw:
+        return "Tell me the wire gauge, like 12 or 18 AWG"
+    if re.fullmatch(r"\d+\s*/\s*0", raw):
+        number = -int(raw.split("/")[0])
+    elif raw in ("00", "000", "0000"):
+        number = -len(raw)
+    else:
+        try:
+            number = int(_first_float(raw))
+        except (TypeError, ValueError):
+            return "Tell me the wire gauge as a number, like 12 or 18"
+    if not -4 <= number <= 40:
+        return "I can do wire gauges from 4 aught to 40"
+    diameter = 0.127 * 92 ** ((36 - number) / 39)
+    area = math.pi * (diameter / 2) ** 2
+    label = (f"{abs(number)} aught" if number < 0 else f"{number}") + " AWG"
+    text = f"{label} wire is {_short(diameter)} millimeters across, {_short(area)} square millimeters"
+    amps = _N_AWG_AMPS.get(number)
+    if amps:
+        text += f", and good for roughly {_num(amps)} amps in free air"
+    else:
+        text += ", a thin signal wire"
+    return text + ". The safe current also depends on insulation and how it is installed"
+
+
+def solar_panels(monthly_kwh: str = "", sun_hours: str = "", panel_watts: str = "400") -> str:
+    """Rough solar system size and panel count for a monthly electricity use."""
+    monthly = _first_float(monthly_kwh)
+    if monthly is None or monthly <= 0:
+        return "Tell me your monthly electricity use in kilowatt hours"
+    sun = max(2.0, min(8.0, _first_float(sun_hours, 4.0)))
+    panel = _first_float(panel_watts, 400.0)
+    if panel is None or panel <= 0:
+        panel = 400.0
+    if panel < 50:   # the user probably said kilowatts
+        panel *= 1000
+    daily = monthly / 30.4
+    system = daily / (sun * 0.8)
+    count = max(1, math.ceil(system * 1000 / panel))
+    annual = system * sun * 0.8 * 365
+    return (f"For {_num(round(monthly))} kilowatt hours a month you need about a {_short(system)} kilowatt system. "
+            f"That is {_num(count)} panels of {_num(round(panel))} watts, roughly {_num(round(count * 1.7))} square "
+            f"meters of roof, making about {_num(round(annual))} kilowatt hours a year")
+
+
+def fit_check(height: str = "", weight: str = "", fit: str = "regular") -> str:
+    """A starting clothing size from height and weight."""
+    centimeters = _height_meters(height)
+    kilos = _weight_kg(weight)
+    if centimeters is None or not 1.2 <= centimeters <= 2.2:
+        return "Tell me your height, like 178 centimeters"
+    if kilos is None or not 30 <= kilos <= 250:
+        return "Tell me your weight, like 75 kilos"
+    cm = centimeters * 100
+    bands = ((158, (48, 56, 66, 78)), (165, (52, 61, 72, 85)), (172, (56, 66, 78, 92)),
+             (180, (60, 71, 84, 98)), (999, (64, 76, 90, 105)))
+    thresholds = next(values for limit, values in bands if cm < limit)
+    index = next((i for i, limit in enumerate(thresholds) if kilos < limit), len(thresholds))
+    sizes = ("extra small", "small", "medium", "large", "extra large")
+    chosen = sizes[min(index, len(sizes) - 1)]
+    low = (fit or "regular").lower()
+    if "slim" in low or "tight" in low:
+        chosen = sizes[min(index + 1, len(sizes) - 1)]
+        advice = "slim cuts run narrow, so try one size up"
+    elif "loose" in low or "oversized" in low or "relaxed" in low:
+        chosen = sizes[max(index - 1, 0)]
+        advice = "relaxed cuts run big, so try one size down"
+    else:
+        advice = "start there and check the chest measurement"
+    return (f"At {_num(round(cm))} centimeters and {_num(round(kilos))} kilos, start with a {chosen}. "
+            f"For that fit, {advice}. Sizes differ between brands, so compare their size chart")
+
+
+def inflation_adjust(amount: str = "", from_year: str = "", to_year: str = "", country: str = "") -> str:
+    """What an amount of money from one year is worth in another, using consumer prices."""
+    value = _amount(amount)
+    start = _first_float(from_year)
+    end = _first_float(to_year)
+    if value is None:
+        return "Tell me the amount of money"
+    if start is None:
+        return "Tell me the starting year"
+    start, end = int(start), int(end) if end is not None else date.today().year
+    if not 1960 <= start <= date.today().year or not 1960 <= end <= date.today().year:
+        return "I can compare years from 1960 up to this year"
+    code = (_country_code(country) or "US").lower()
+    data = _get(f"https://api.worldbank.org/v2/country/{code}/indicator/FP.CPI.TOTL",
+                {"format": "json", "per_page": 80, "date": "1960:2026"})
+    rows = data[1] if isinstance(data, list) and len(data) > 1 else []
+    series = {}
+    for row in rows or []:
+        try:
+            if row.get("value") is not None:
+                series[int(row["date"])] = float(row["value"])
+        except (KeyError, TypeError, ValueError):
+            continue
+    if not series:
+        return "Sorry, I could not get the consumer price index for that country"
+
+    def nearest(year):
+        for gap in range(0, 4):
+            for candidate in (year - gap, year + gap):
+                if candidate in series:
+                    return candidate, series[candidate]
+        return None, None
+
+    real_start, cpi_start = nearest(start)
+    real_end, cpi_end = nearest(end)
+    if cpi_start is None or cpi_end is None:
+        return "Sorry, the price index does not cover those years"
+    adjusted = value * cpi_end / cpi_start
+    text = (f"{_money(value)} in {real_start} is about {_money(adjusted)} in {real_end}, "
+            f"using consumer prices")
+    if real_start != start or real_end != end:
+        text += " (the closest years with data)"
+    return text
+
+
+def credit_payoff(balance: str = "", apr: str = "", payment: str = "") -> str:
+    """How long a credit card takes to clear at a fixed monthly payment."""
+    owed = _amount(balance)
+    rate_percent = _first_float(apr)
+    monthly_payment = _amount(payment)
+    if owed is None or owed <= 0:
+        return "Tell me the balance you owe"
+    if rate_percent is None or rate_percent < 0:
+        return "Tell me the interest rate, like 24 percent"
+    if monthly_payment is None or monthly_payment <= 0:
+        return "Tell me the monthly payment"
+    monthly_rate = rate_percent / 100 / 12
+    if monthly_payment <= owed * monthly_rate:
+        return (f"At {_num(round(rate_percent, 1))} percent, interest alone is about "
+                f"{_spent(owed * monthly_rate)} a month, so that payment never clears the balance")
+    remaining, months, paid = owed, 0, 0.0
+    while remaining > 0.005 and months < 1200:
+        interest = remaining * monthly_rate
+        remaining += interest
+        paid += min(monthly_payment, remaining)
+        remaining -= monthly_payment
+        months += 1
+    interest_paid = max(0.0, paid - owed)
+    years, rest = divmod(months, 12)
+    when = f"{years} years and {rest} months" if years and rest else f"{years} years" if years else f"{months} months"
+    extra = f", and you pay about {_spent(interest_paid)} in interest" if monthly_rate else " with no interest"
+    return f"Paying {_spent(monthly_payment)} a month clears {_spent(owed)} in {when}{extra}"
+
+
+def emergency_fund(monthly_expenses: str = "", months: str = "6", saved: str = "") -> str:
+    """How big an emergency fund should be and how much is still missing."""
+    expenses = _amount(monthly_expenses)
+    if expenses is None or expenses <= 0:
+        return "Tell me your monthly essential expenses"
+    cover = _first_float(months, 6.0)
+    cover = max(1, min(24, int(cover or 6)))
+    target = expenses * cover
+    already = _amount(saved)
+    if already is not None and already > 0:
+        gap = max(0.0, target - already)
+        if gap <= 0:
+            return f"You are there: {_spent(already)} covers {cover} months of {_spent(expenses)}"
+        return (f"A {cover} month cushion is {_spent(target)}. You have {_spent(already)}, "
+                f"so {_spent(gap)} to go, about {_num(round(gap / target * 100))} percent of the target still to save")
+    return (f"Aim for {_spent(target)} in an emergency fund, which is {cover} months of {_spent(expenses)}. "
+            "Keep it in a savings account you can reach quickly")
+
+
+def rent_affordability(income: str = "", rent: str = "") -> str:
+    """How much of an income the rent takes and what is usually affordable."""
+    monthly_income = _amount(income)
+    monthly_rent = _amount(rent)
+    if monthly_income is None or monthly_income <= 0:
+        return "Tell me your monthly income"
+    if monthly_rent is None or monthly_rent < 0:
+        return "Tell me the monthly rent"
+    share = monthly_rent / monthly_income * 100
+    guide = monthly_income * 0.3
+    if share <= 30:
+        verdict = "comfortable"
+    elif share <= 40:
+        verdict = "a stretch"
+    elif share <= 50:
+        verdict = "risky"
+    else:
+        verdict = "too much for most budgets"
+    return (f"Rent of {_spent(monthly_rent)} is {_num(round(share, 1))} percent of {_spent(monthly_income)}, "
+            f"which is {verdict}. The common guide is 30 percent, about {_spent(guide)}. "
+            "Use take-home pay and include utilities")
+
+
+def flight_time(from_place: str = "", to_place: str = "", cruise: str = "850") -> str:
+    """Approximate flying time between two places."""
+    start = _geocode(from_place)
+    if not start:
+        return _no_place(from_place)
+    end = _geocode(to_place)
+    if not end:
+        return _no_place(to_place)
+    distance = _haversine_km(start, end) * 1.08
+    speed = _first_float(cruise, 850.0)
+    speed = max(400.0, min(1000.0, speed))
+    air = distance / speed * 60 + 25
+    hours, minutes = divmod(int(round(air)), 60)
+    length = f"{hours} hours and {minutes} minutes" if hours else f"{minutes} minutes"
+    return (f"{start.get('name') or 'here'} to {end.get('name') or 'there'} is about "
+            f"{_num(round(distance))} kilometers. Expect roughly {length} in the air, "
+            f"plus about two hours at the airports")
+
+
+def jet_lag_plan(from_place: str = "", to_place: str = "", days: str = "3") -> str:
+    """A small plan for shifting sleep before a flight."""
+    end = _geocode(to_place)
+    if not end:
+        return _no_place(to_place)
+    start = _geocode(from_place) if (from_place or "").strip() else None
+    if (from_place or "").strip() and not start:
+        return _no_place(from_place)
+    offset_end = _utc_offset(end)
+    offset_start = time.localtime().tm_gmtoff if start is None else _utc_offset(start)
+    if offset_end is None or offset_start is None:
+        return "Sorry, I could not get the time zones"
+    difference = round((offset_end - offset_start) / 3600)
+    if abs(difference) < 2:
+        return f"{end.get('name') or 'There'} is close enough to your time zone, so jet lag should be mild"
+    ahead = difference > 0
+    nights = max(1, min(14, int(_first_float(days, 3.0))))
+    shift = min(1.0, abs(difference) / nights)
+    hours = f"{difference} hours ahead" if ahead else f"{abs(difference)} hours behind"
+    direction = "earlier" if ahead else "later"
+    unit = "hour" if round(shift, 1) == 1 else "hours"
+    return (f"{end.get('name') or 'There'} is {hours}. In the {nights} nights before you fly, move your bedtime "
+            f"about {_num(round(shift, 1))} {unit} {direction} each night. "
+            f"{'Get morning light' if ahead else 'Get evening light'} on arrival, and keep meals on local time")
+
+
+def packing_list(place: str = "", days: str = "3", trip: str = "") -> str:
+    """A packing list that follows the forecast for the destination."""
+    where = _geocode(place)
+    if not where:
+        return _no_place(place)
+    nights = max(1, min(30, int(_first_float(days, 3.0))))
+    name = where.get("name") or "your destination"
+    data = _get("https://api.open-meteo.com/v1/forecast",
+                {"latitude": where["latitude"], "longitude": where["longitude"], "timezone": "auto",
+                 "forecast_days": min(nights, 14),
+                 "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max"})
+    daily = (data or {}).get("daily") or {}
+    highs = [v for v in daily.get("temperature_2m_max") or [] if isinstance(v, (int, float))]
+    lows = [v for v in daily.get("temperature_2m_min") or [] if isinstance(v, (int, float))]
+    rain = [v for v in daily.get("precipitation_probability_max") or [] if isinstance(v, (int, float))]
+    codes = set(daily.get("weather_code") or [])
+    items = [f"{nights + 1} sets of underwear and socks", "toiletries", "phone charger and power bank", "medication"]
+    notes = []
+    if highs:
+        top, bottom = max(highs), min(lows) if lows else min(highs)
+        if top <= 5:
+            items += ["warm coat", "hat, gloves and scarf", "thermal layers"]
+            notes.append("cold")
+        elif top <= 15:
+            items += ["jacket or sweater", "long trousers"]
+            notes.append("cool")
+        elif top >= 26:
+            items += ["light t-shirts", "shorts or a skirt", "sun hat"]
+            notes.append("hot")
+        else:
+            items += ["t-shirts and a light layer", "comfortable trousers"]
+            notes.append("mild")
+        if max(rain or [0]) >= 40 or codes & _WET_CODES:
+            items += ["umbrella or rain jacket"]
+            notes.append("some rain is likely")
+        if codes & _SNOW_CODES:
+            items += ["waterproof boots"]
+        weather_text = f"It will be about {round(bottom)} to {round(top)} degrees, {', '.join(notes)}"
+    else:
+        weather_text = "I could not get the forecast, so pack for the season"
+    low = (trip or "").lower()
+    extra = []
+    if re.search(r"beach|sea|swim|pool", low):
+        extra += ["swimwear", "sunscreen", "towel"]
+    if re.search(r"hike|hiking|mountain|trail", low):
+        extra += ["broken-in boots", "water bottle", "rain shell"]
+    if re.search(r"business|work|conference|meeting", low):
+        extra += ["one smart outfit", "laptop and charger"]
+    if re.search(r"camp|camping|tent", low):
+        extra += ["tent", "sleeping bag", "headlamp"]
+    text = f"For {nights} nights in {name}, pack " + ", ".join(items) + "."
+    if extra:
+        text += " Add " + ", ".join(extra) + "."
+    return text + " " + weather_text
+
+
+_N_PLUGS = {
+    "US": ("A and B", 120, 60), "CA": ("A and B", 120, 60), "MX": ("A and B", 127, 60),
+    "JP": ("A and B", 100, "50 or 60"), "GB": ("G", 230, 50),
+    "IE": ("G", 230, 50), "FR": ("C and E", 230, 50), "DE": ("C and F", 230, 50),
+    "ES": ("C and F", 230, 50), "IT": ("C, F and L", 230, 50), "PT": ("C and F", 230, 50),
+    "NL": ("C and F", 230, 50), "BE": ("C and E", 230, 50), "LU": ("C and F", 230, 50),
+    "AT": ("C and F", 230, 50), "CH": ("C and J", 230, 50), "DK": ("C and K", 230, 50),
+    "SE": ("C and F", 230, 50), "NO": ("C and F", 230, 50), "FI": ("C and F", 230, 50),
+    "IS": ("C and F", 230, 50), "PL": ("C and E", 230, 50), "CZ": ("C and E", 230, 50),
+    "SK": ("C and E", 230, 50), "HU": ("C and F", 230, 50), "SI": ("C and F", 230, 50),
+    "HR": ("C and F", 230, 50), "RS": ("C and F", 230, 50), "RO": ("C and F", 230, 50),
+    "BG": ("C and F", 230, 50), "GR": ("C and F", 230, 50), "TR": ("C and F", 230, 50),
+    "UA": ("C and F", 230, 50), "EE": ("C and F", 230, 50), "LV": ("C and F", 230, 50),
+    "LT": ("C and F", 230, 50), "RU": ("C and F", 220, 50), "IL": ("C and H", 230, 50),
+    "AE": ("C and G", 230, 50), "SA": ("C and G", 230, 60), "ZA": ("C, M and N", 230, 50),
+    "IN": ("C, D and M", 230, 50), "PK": ("C and D", 230, 50), "CN": ("A, C and I", 220, 50),
+    "HK": ("G and D", 220, 50), "SG": ("C and G", 230, 50), "MY": ("A, C and G", 240, 50),
+    "TH": ("A, B and C", 230, 50), "VN": ("A, C and G", 220, 50), "ID": ("C and F", 230, 50),
+    "PH": ("A, B and C", 220, 60), "KR": ("C and F", 220, 60), "TW": ("A and B", 110, 60),
+    "AU": ("I", 230, 50), "NZ": ("I", 230, 50), "BR": ("C and N", "127 and 220", 60),
+    "AR": ("C and I", 220, 50), "CL": ("C and L", 220, 50), "CO": ("A and B", 110, 60),
+    "PE": ("A and C", 220, 60), "EG": ("C and F", 220, 50), "KE": ("G", 240, 50),
+    "NG": ("D and G", 230, 50), "MA": ("C and E", 220, 50), "TN": ("C and E", 230, 50),
+    "CY": ("G", 230, 50), "MT": ("G", 230, 50),
+}
+
+
+def power_plug(country: str = "") -> str:
+    """Plug type, voltage and frequency for a country."""
+    code = _country_code(country)
+    if not code:
+        return f"I do not know the country {country}"
+    entry = _N_PLUGS.get(code)
+    if not entry:
+        return (f"I do not have the socket details for {code}. Most of Europe uses C or F sockets at "
+                "230 volts and 50 hertz")
+    plugs, volts, hertz = entry
+    return (f"{code} uses type {plugs} sockets, {volts} volts and {hertz} hertz. "
+            "Check your charger labels before plugging anything in")
+
+
+# ---- journal, review and school ---------------------------------------------
+def log_journal(entry: str = "") -> str:
+    """Write a dated journal entry."""
+    text = " ".join((entry or "").split())
+    if not text:
+        return "Tell me what to write in your journal"
+    with _DATA_LOCK:
+        data = _data_load()
+        items = [e for e in data.get("journal", []) if isinstance(e, dict)]
+        items.append({"time": time.time(), "text": text[:2000]})
+        data["journal"] = items[-3000:]
+        _data_save(data)
+    stamp = datetime.now()
+    return f"Saved to your journal for {WEEKDAYS[stamp.weekday()]}, {MONTHS[stamp.month - 1]} {stamp.day}"
+
+
+def read_journal(period: str = "today") -> str:
+    """Read back journal entries for a day, a week or everything."""
+    low = (period or "today").lower()
+    today = date.today()
+    if "last week" in low:
+        start = today - timedelta(days=today.weekday() + 7)
+        end, label = start + timedelta(days=6), "last week"
+    elif "week" in low:
+        start, end, label = today - timedelta(days=today.weekday()), today, "this week"
+    elif "month" in low:
+        start, end, label = today.replace(day=1), today, "this month"
+    elif re.search(r"\ball\b|everything|ever", low):
+        start, end, label = date.min, today, "your journal"
+    else:
+        d = _n_date(low) or today
+        start = end = d
+        label = "today" if d == today else "yesterday" if d == today - timedelta(days=1) else _fmt_date(d)
+    with _DATA_LOCK:
+        entries = [e for e in _data_load().get("journal", []) if isinstance(e, dict) and e.get("text")]
+    found = []
+    for entry in entries:
+        try:
+            when = date.fromtimestamp(float(entry["time"]))
+        except (KeyError, TypeError, ValueError, OSError):
+            continue
+        if start <= when <= end:
+            found.append((when, str(entry["text"])))
+    if not found:
+        return f"Nothing in your journal for {label}"
+    found.sort(key=lambda pair: pair[0])
+    shown = found[-5:]
+    parts = []
+    for when, text in shown:
+        prefix = "" if start == end else f"{WEEKDAYS[when.weekday()]}: "
+        parts.append(prefix + text)
+    text = f"{label.capitalize()}: " + "; ".join(parts)
+    if len(found) > len(shown):
+        text += f" And {len(found) - len(shown)} older entries"
+    return text
+
+
+def weekly_review() -> str:
+    """A spoken summary of the last seven days."""
+    today = date.today()
+    cutoff = today - timedelta(days=6)
+    with _DATA_LOCK:
+        data = _data_load()
+    entries = [e for e in data.get("journal", []) if isinstance(e, dict)]
+    journal = 0
+    for entry in entries:
+        try:
+            if date.fromtimestamp(float(entry["time"])) >= cutoff:
+                journal += 1
+        except (KeyError, TypeError, ValueError, OSError):
+            continue
+    expenses = []
+    for item in data.get("expenses", []):
+        try:
+            when = date.fromtimestamp(float(item["time"]))
+        except (KeyError, TypeError, ValueError, OSError):
+            continue
+        if when >= cutoff:
+            expenses.append(item)
+    moods = []
+    for item in data.get("moods", []):
+        try:
+            if date.fromisoformat(item["d"]) >= cutoff:
+                moods.append(float(item["m"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    habits = data.get("habits") if isinstance(data.get("habits"), dict) else {}
+    counted = []
+    for name, log in habits.items():
+        total = sum(x.get("n", 0) for x in log if isinstance(x, dict)
+                    and str(x.get("d", "")) >= cutoff.isoformat())
+        if total:
+            counted.append((name, total))
+    parts = []
+    parts.append(f"you wrote {journal} journal {'entry' if journal == 1 else 'entries'}"
+                 if journal else "no journal entries")
+    if expenses:
+        total = sum(float(e.get("amount", 0)) for e in expenses)
+        by_category = {}
+        for item in expenses:
+            by_category[item.get("category", "other")] = by_category.get(item.get("category", "other"), 0) + float(item.get("amount", 0))
+        top = max(by_category.items(), key=lambda pair: pair[1])
+        parts.append(f"you spent {_spent(total)}, most of it on {top[0]}")
+    if counted:
+        counted.sort(key=lambda pair: pair[1], reverse=True)
+        parts.append("counted " + ", ".join(f"{_num(v)} {name}" for name, v in counted[:3]))
+    if moods:
+        parts.append(f"your mood averaged {_num(round(sum(moods) / len(moods), 1))} out of 10")
+    todo = data.get("lists", {}).get("todo") or []
+    if todo:
+        parts.append(f"{len(todo)} things are still on your to do list")
+    if len(parts) == 1 and not journal and not expenses and not counted and not moods and not todo:
+        return "Nothing has been logged this week yet"
+    return "Here is your week: " + "; ".join(parts)
+
+
+def grade_needed(current: str = "", target: str = "", final_weight: str = "") -> str:
+    """The final exam score needed to reach a target grade."""
+    have = _first_float(current)
+    want = _first_float(target)
+    weight = _first_float(final_weight)
+    if have is None:
+        return "Tell me your current grade as a percentage"
+    if want is None:
+        return "Tell me the grade you want, as a percentage"
+    if weight is None or not 0 < weight <= 100:
+        return "Tell me how much the final is worth, like 30 percent"
+    portion = weight / 100
+    needed = (want - have * (1 - portion)) / portion
+    if needed <= 0:
+        return f"You already have {_num(round(have, 1))} percent, so {_num(round(want, 1))} is safe even with a zero"
+    if needed > 100:
+        best = have * (1 - portion) + 100 * portion
+        return (f"You would need {_num(round(needed, 1))} percent on the final, which is not possible. "
+                f"The best you can finish with is {_num(round(best, 1))} percent")
+    return (f"With {_num(round(have, 1))} percent now and a final worth {_num(round(weight))} percent, "
+            f"you need {_num(round(needed, 1))} percent on the final for {_num(round(want, 1))} overall")
+
+
+# ---- text and code helpers --------------------------------------------------
+def json_format(text: str = "") -> str:
+    """Check whether a piece of JSON is valid and describe its shape."""
+    raw = (text or "").strip()
+    if not raw:
+        return "Paste the JSON and I will check it"
+    try:
+        parsed = json.loads(raw)
+    except ValueError as exc:
+        message = str(exc)
+        position = re.search(r"line (\d+) column (\d+)", message)
+        where = f" at line {position.group(1)}, column {position.group(2)}" if position else ""
+        reason = message.split(":")[0]
+        return f"That is not valid JSON: {reason.lower()}{where}"
+    pretty = json.dumps(parsed, indent=2, ensure_ascii=False)
+    kind = "an object" if isinstance(parsed, dict) else "a list" if isinstance(parsed, list) else \
+        "a string" if isinstance(parsed, str) else \
+        "a number" if isinstance(parsed, (int, float)) and not isinstance(parsed, bool) else \
+        "true" if parsed is True else "false" if parsed is False else "null"
+    text_out = f"Valid JSON: {kind}"
+    if isinstance(parsed, dict):
+        text_out += f" with {len(parsed)} keys"
+    elif isinstance(parsed, list):
+        text_out += f" with {len(parsed)} items"
+    if pretty != raw:
+        text_out += f". Pretty printed it is {len(pretty)} characters"
+    return text_out
+
+
+def regex_test(pattern: str = "", text: str = "") -> str:
+    """Test a regular expression against a text."""
+    raw = (pattern or "").strip()
+    subject = (text or "")[:5000]
+    if not raw:
+        return "Tell me the regular expression"
+    if len(raw) > 200:
+        return "That pattern is too long for me to test safely"
+    if not subject:
+        return "Tell me the text to test"
+    try:
+        compiled = re.compile(raw)
+    except re.error as exc:
+        return f"That pattern does not compile: {exc}"
+    found = compiled.findall(subject)
+    if not found:
+        return "That pattern does not match the text"
+    if isinstance(found[0], tuple):
+        rendered = [" / ".join(str(p) for p in match).strip(" /") for match in found[:3]]
+    else:
+        rendered = [str(match) for match in found[:3]]
+    text_out = (f"{'One match' if len(found) == 1 else _num(len(found)) + ' matches'}: "
+                + "; ".join(rendered))
+    if len(found) > 3:
+        text_out += f"; and {len(found) - 3} more"
+    return text_out
+
+
+def jwt_decode(token: str = "") -> str:
+    """Read the header and claims of a JWT without verifying it."""
+    raw = re.sub(r"^bearer\s+", "", (token or "").strip(), flags=re.I)
+    parts = raw.split(".")
+    if len(parts) != 3:
+        return "That does not look like a JWT. It should have three parts separated by dots"
+
+    def decode(part):
+        padded = part + "=" * (-len(part) % 4)
+        return json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+
+    try:
+        header, payload = decode(parts[0]), decode(parts[1])
+    except (ValueError, UnicodeDecodeError, TypeError):
+        return "I could not decode that token"
+    bits = [f"signed with {header.get('alg', 'an unknown algorithm')}"]
+    for key, label in (("iss", "issuer"), ("sub", "subject"), ("aud", "audience")):
+        if payload.get(key):
+            bits.append(f"{label} {payload[key]}")
+    for key, label in (("iat", "issued"), ("nbf", "valid from"), ("exp", "expires")):
+        if isinstance(payload.get(key), (int, float)):
+            try:
+                when = datetime.fromtimestamp(payload[key], timezone.utc).strftime("%B %d, %Y")
+                bits.append(f"{label} {when}")
+            except (ValueError, OSError, OverflowError):
+                continue
+    if isinstance(payload.get("exp"), (int, float)) and payload["exp"] < time.time():
+        bits.append("it has already expired")
+    return ("The token is " + ", ".join(bits) +
+            ". Nothing was verified, so do not trust it for anything important")
+
+
+def text_diff(first: str = "", second: str = "") -> str:
+    """What changed between two pieces of text."""
+    a, b = " ".join((first or "").split())[:20000], " ".join((second or "").split())[:20000]
+    if not a and not b:
+        return "Give me two texts to compare"
+    if a == b:
+        return "The two texts are identical"
+    words_a, words_b = a.split(), b.split()
+    matcher = difflib.SequenceMatcher(None, words_a, words_b)
+    added, removed = [], []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag in ("replace", "insert"):
+            added.extend(words_b[j1:j2])
+        if tag in ("replace", "delete"):
+            removed.extend(words_a[i1:i2])
+    limit = 12
+    pieces = []
+    if removed:
+        pieces.append("removed " + " ".join(removed[:limit]) + (" ..." if len(removed) > limit else ""))
+    if added:
+        pieces.append("added " + " ".join(added[:limit]) + (" ..." if len(added) > limit else ""))
+    return "The second text " + " and ".join(pieces) if pieces else "The wording changed"
+
+
+# ---- fun --------------------------------------------------------------------
+def rock_paper_scissors(choice: str = "") -> str:
+    """Play rock, paper, scissors against Kate."""
+    low = re.sub(r"[^a-z]", "", (choice or "").lower())
+    picked = {"rock": "rock", "stone": "rock", "paper": "paper", "scissors": "scissors",
+              "scissor": "scissors", "r": "rock", "p": "paper", "s": "scissors"}.get(low)
+    if not picked:
+        return "Pick rock, paper or scissors"
+    kate = random.choice(("rock", "paper", "scissors"))
+    beats = {"rock": "scissors", "paper": "rock", "scissors": "paper"}
+    if kate == picked:
+        result = "That is a draw"
+    elif beats[picked] == kate:
+        result = "You win"
+    else:
+        result = "I win"
+    return f"You picked {picked}, I picked {kate}. {result}"
+
+
+_N_FORTUNES = (
+    "A small step today saves a long walk tomorrow",
+    "The answer you need will arrive when you stop refreshing",
+    "Someone is quietly rooting for you",
+    "Better to ask the question than to keep guessing",
+    "Your next good idea is closer than it feels",
+    "A tidy desk is nice, but a finished thing is better",
+    "You will hear from someone you have been thinking about",
+    "Say yes to the thing that scares you a little",
+    "The detour is part of the route",
+    "Rest is not a reward, it is part of the work",
+    "An old friend will surprise you this month",
+    "What you practice in private will show up in public",
+    "Do the boring part first and the day opens up",
+    "A number you are worried about is smaller than you think",
+    "Keep the receipt, and keep the promise",
+    "Luck likes people who answer their messages",
+    "You are allowed to change your mind",
+    "The right words will come at the wrong time, and that is fine",
+    "Plant the thing now and water it on Thursday",
+    "Someone will notice the effort you thought was invisible",
+    "A shortcut you skip today is a problem you skip tomorrow",
+    "Your patience is about to pay out",
+    "Choose the option you would defend to a friend",
+    "The best time to start was earlier, the second best is now",
+    "Good news travels slower than gossip, but it lasts longer",
+)
+
+
+def fortune_cookie() -> str:
+    """A short fortune from a local list."""
+    return "Your fortune: " + random.choice(_N_FORTUNES)
+
+
+_N_MAJORS = (
+    ("The Fool", "a fresh start, curiosity and a leap of faith", "hesitation, or a leap taken too soon"),
+    ("The Magician", "skill, willpower and the tools already in your hands", "scattered effort or a trick"),
+    ("The High Priestess", "intuition, secrets and listening before speaking", "ignoring a gut feeling"),
+    ("The Empress", "care, growth and comfort", "neglect or giving too much"),
+    ("The Emperor", "structure, boundaries and steady authority", "control or rigidity"),
+    ("The Hierophant", "tradition, learning and good advice", "breaking a rule that needed breaking"),
+    ("The Lovers", "a real choice, honesty and connection", "a values mismatch or indecision"),
+    ("The Chariot", "momentum, discipline and a clear direction", "stalling or forcing the pace"),
+    ("Strength", "quiet courage and patience with yourself", "doubt or burnout"),
+    ("The Hermit", "solitude, reflection and one honest question", "isolation or avoiding the answer"),
+    ("Wheel of Fortune", "a turning point and timing you cannot control", "resisting a change that is already here"),
+    ("Justice", "fairness, truth and consequences", "a bias or an unfinished reckoning"),
+    ("The Hanged Man", "a pause that changes the view", "waiting for no reason"),
+    ("Death", "an ending that makes room for something else", "holding on past its time"),
+    ("Temperance", "balance, patience and a careful mix", "excess or impatience"),
+    ("The Devil", "a habit or bargain that has too much power", "breaking free from it"),
+    ("The Tower", "a sudden truth that clears the ground", "a shake-up avoided too long"),
+    ("The Star", "hope, recovery and a quiet sense of direction", "discouragement"),
+    ("The Moon", "uncertainty, dreams and things half seen", "confusion clearing"),
+    ("The Sun", "clarity, warmth and a good result", "a delay in the good news"),
+    ("Judgement", "an honest reckoning and a second chance", "self-doubt or dodging the call"),
+    ("The World", "completion, wholeness and a trip well taken", "loose ends still to tie"),
+)
+
+_N_SUITS = {"wands": "work, energy and ambition", "cups": "feelings, relationships and intuition",
+            "swords": "thought, words and conflict", "pentacles": "money, home and the body"}
+_N_RANKS = {"ace": "a beginning", "two": "a choice", "three": "early growth", "four": "a foundation",
+            "five": "friction", "six": "small progress", "seven": "a test", "eight": "steady effort",
+            "nine": "near completion", "ten": "a conclusion", "page": "a message", "knight": "movement",
+            "queen": "care and judgement", "king": "mastery"}
+
+
+def tarot_card(question: str = "") -> str:
+    """Draw one tarot card, upright or reversed."""
+    reversed_flag = random.random() < 0.4
+    if random.random() < 0.28:   # 22 of the 78 cards are major arcana
+        name, upright, downside = random.choice(_N_MAJORS)
+        meaning = downside if reversed_flag else upright
+    else:
+        suit, rank = random.choice(tuple(_N_SUITS)), random.choice(tuple(_N_RANKS))
+        name = f"{rank.title()} of {suit.title()}"
+        meaning = (f"the {_N_RANKS[rank]} in {_N_SUITS[suit]} needs a second look" if reversed_flag
+                   else f"{_N_RANKS[rank]} in {_N_SUITS[suit]}")
+    card = (name if name.lower().startswith("the ") else f"The {name}") + \
+        (", reversed" if reversed_flag else "")
+    text = f"{card}. {meaning.capitalize()}"
+    asked = " ".join((question or "").split())
+    if asked:
+        text += f". For your question about {asked[:120]}, that is the theme to sit with"
+    return text
+
+
+_N_LOTTERIES = {
+    "eurojackpot": (5, 50, 2, 10, "euro numbers"),
+    "euromillions": (5, 50, 2, 12, "lucky stars"),
+    "powerball": (5, 69, 1, 26, "the powerball"),
+    "megamillions": (5, 70, 1, 25, "the mega ball"),
+    "mega millions": (5, 70, 1, 25, "the mega ball"),
+    "lottery": (6, 49, 0, 0, ""),
+    "lotto": (6, 49, 0, 0, ""),
+    "649": (6, 49, 0, 0, ""),
+}
+
+
+def lottery_numbers(game: str = "eurojackpot") -> str:
+    """Random lottery numbers for a named game."""
+    low = " ".join((game or "eurojackpot").lower().split())
+    custom = re.search(r"\b(\d+)\s*(?:from|/)\s*(\d+)\b", low)
+    if custom:
+        numbers, total_main = int(custom.group(1)), int(custom.group(2))
+        extra, total_extra, extra_label = 0, 0, ""
+        label = f"{numbers} from {total_main}"
+    else:
+        key = next((name for name in _N_LOTTERIES if name in low), "eurojackpot")
+        numbers, total_main, extra, total_extra, extra_label = _N_LOTTERIES[key]
+        label = "Eurojackpot" if key == "eurojackpot" else key.title()
+    if not 1 <= numbers <= total_main or extra > total_extra:
+        return "Tell me the game, like Eurojackpot, Powerball or 6 from 49"
+    drawn = sorted(random.sample(range(1, total_main + 1), numbers))
+    text = f"{label}: " + ", ".join(str(n) for n in drawn)
+    if extra:
+        bonus = sorted(random.sample(range(1, total_extra + 1), extra))
+        text += f", and {extra_label} " + " and ".join(str(n) for n in bonus)
+    return text + ". Good luck"
+
+
 # ---- specs: how each tool is described to the model ------------------------
 _MORE_SPECS5 = [
     _tool("remember_fact", "Remember any fact the user tells you so it can be recalled later. Use for 'remember that my passport is in the blue drawer', "
@@ -7662,6 +9430,199 @@ _MORE_SPECS5 = [
           {"mac": _text("The MAC address, e.g. '3C:5A:B4:12:34:56'.")}, ["mac"]),
 ]
 _EXTRA_SPECS.extend(_MORE_SPECS5)
+
+_MORE_SPECS6 = [
+    _tool("weather_on_date", "The weather a place had on a past date. Use for 'what was the weather like yesterday', "
+          "'how hot was it in Prague last Friday', 'was it raining on October 12'.",
+          {"location": _text("The place, e.g. 'Prague'. Leave empty for the home city."),
+           "date_text": _text("The day, e.g. 'yesterday', 'last Friday', 'October 12'.")}, ["date_text"]),
+    _tool("air_quality_forecast", "Air quality and pollen for today or tomorrow. Use for 'how is the air quality', "
+          "'is there a lot of pollen tomorrow', 'should I run outside today'.",
+          {"location": _text("The place, e.g. 'Brno'. Leave empty for the home city."),
+           "day": _text("'today' normally, or 'tomorrow'.")}),
+    _tool("golden_hour", "The morning and evening golden hour and blue hour for photography. Use for "
+          "'when is golden hour', 'when should I shoot photos today', 'blue hour tomorrow'.",
+          {"location": _text("The place, e.g. 'Prague'. Leave empty for the home city."),
+           "date_text": _text("The day, e.g. 'today' or 'tomorrow'.")}),
+    _tool("aurora_forecast", "The current Kp index and whether the northern or southern lights could be visible. "
+          "Use for 'will there be aurora tonight', 'northern lights forecast', 'is the aurora strong now'.",
+          {"location": _text("The place, e.g. 'Tromso'. Leave empty for the home city.")}),
+    _tool("sky_tonight", "Which bright planets are visible tonight and where to look. Use for "
+          "'what can I see in the sky tonight', 'which planets are visible', 'is Jupiter up tonight'.",
+          {"location": _text("The place, e.g. 'Prague'. Leave empty for the home city.")}),
+    _tool("meteor_shower", "The next meteor shower peak, where to look and how bright the moon will be. Use for "
+          "'when is the next meteor shower', 'will the Perseids be good this year', 'any shooting stars soon'.",
+          {"when": _text("'next' normally, or the shower name, e.g. 'Perseids'.")}),
+    _tool("reddit_top", "The top posts in a subreddit today. Use for 'what is on reddit', 'top posts in r/technology', "
+          "'what is popular on reddit right now'.",
+          {"subreddit": _text("The subreddit, e.g. 'technology'. Leave empty for the front page."),
+           "count": _text("How many posts, e.g. '5'. Up to 10.")}),
+    _tool("arxiv_search", "Recent research papers on a topic from arXiv. Use for 'find papers about ...', "
+          "'latest research on black holes', 'search arxiv for transformers'.",
+          {"query": _text("The topic, e.g. 'black holes'."),
+           "count": _text("How many papers, e.g. '3'. Up to 5.")}, ["query"]),
+    _tool("trending_searches", "What people are searching for right now in a country. Use for 'what is trending', "
+          "'trending in Germany', 'what is everyone googling today'.",
+          {"country": _text("The country, e.g. 'Czech Republic'. Leave empty for the home country.")}),
+    _tool("stackoverflow_search", "Top Stack Overflow answers for a programming problem. Use for "
+          "'how do I fix this in Python, search stack overflow', 'stack overflow on async await'.",
+          {"query": _text("The problem, e.g. 'python read json file'."),
+           "count": _text("How many results, e.g. '3'. Up to 5.")}, ["query"]),
+    _tool("github_user", "Profile facts for a GitHub user: repositories and followers. Use for "
+          "'who is torvalds on github', 'how many followers does ... have', 'github profile of ...'.",
+          {"username": _text("The GitHub username, e.g. 'torvalds'.")}, ["username"]),
+    _tool("domain_info", "Who registered a domain, when, and when it expires. Use for "
+          "'who owns example.com', 'when was this domain registered', 'when does my domain expire'.",
+          {"domain": _text("The domain, e.g. 'example.com'.")}, ["domain"]),
+    _tool("link_preview", "The title and description of a web page. Use for 'what is this link about', "
+          "'summarize this page', 'preview example.com/article'.",
+          {"url": _text("The web address, e.g. 'example.com/article'.")}, ["url"]),
+    _tool("word_origin", "Where a word comes from. Use for 'where does the word ... come from', "
+          "'etymology of salary', 'origin of the word ...'.",
+          {"word": _text("The word, e.g. 'salary'.")}, ["word"]),
+    _tool("pronounce_word", "How to pronounce a word, with syllables and phonetics. Use for "
+          "'how do you pronounce ...', 'how many syllables in ...', 'pronunciation of ...'.",
+          {"word": _text("The word, e.g. 'epitome'.")}, ["word"]),
+    _tool("acronym_expand", "What an acronym usually stands for. Use for 'what does NASA stand for', "
+          "'what is GDP', 'expand the acronym ...'.",
+          {"acronym": _text("The acronym, e.g. 'NASA'.")}, ["acronym"]),
+    _tool("city_info", "Population, elevation, timezone and coordinates of a city. Use for "
+          "'tell me about Lisbon', 'how big is Berlin', 'where is Cusco'.",
+          {"city": _text("The city, e.g. 'Lisbon'.")}, ["city"]),
+    _tool("movie_info", "Year, director and a short plot of a film. Use for 'tell me about the film ...', "
+          "'who directed ...', 'what is ... about'.",
+          {"title": _text("The film title, e.g. 'Inception'.")}, ["title"]),
+    _tool("food_safety_temp", "The safe internal temperature for meat, fish, eggs and leftovers. Use for "
+          "'what temperature should chicken be', 'is this pork cooked enough', 'safe temperature for leftovers'.",
+          {"food": _text("The food, e.g. 'chicken'.")}, ["food"]),
+    _tool("defrost_time", "How long food takes to thaw in the fridge, in water or in the microwave. Use for "
+          "'how long does a kilo of chicken take to defrost', 'thawing time for a turkey'.",
+          {"food": _text("The food, e.g. 'chicken'."),
+           "weight": _text("The weight, e.g. '1.5 kilos'."),
+           "method": _text("'fridge' normally. Also 'water' or 'microwave'.")}, ["food"]),
+    _tool("wine_pairing", "A wine for a dish, with a cheaper alternative. Use for 'what wine goes with steak', "
+          "'wine with salmon', 'pairing for a spicy curry'.",
+          {"dish": _text("The dish, e.g. 'steak'.")}, ["dish"]),
+    _tool("tea_brew", "Water temperature and steeping time for a tea. Use for 'how do I brew green tea', "
+          "'what temperature for oolong', 'how long to steep black tea'.",
+          {"tea": _text("The tea, e.g. 'green'.")}, ["tea"]),
+    _tool("blood_pressure_check", "The category for a blood pressure reading. Use for 'is 130 over 85 high', "
+          "'what does 120 over 80 mean', 'check my blood pressure reading'.",
+          {"systolic": _text("The top number, e.g. '130'."),
+           "diastolic": _text("The bottom number, e.g. '85'.")}, ["systolic", "diastolic"]),
+    _tool("pregnancy_due_date", "Estimated due date from the last period or the conception date. Use for "
+          "'when is my baby due', 'due date from June 3', 'how far along am I'.",
+          {"last_period": _text("First day of the last period, e.g. 'June 3'. Leave empty if a conception date is given."),
+           "conception": _text("The conception date, e.g. 'June 17'. Leave empty when the last period is given.")}),
+    _tool("pet_food", "How much to feed a dog or a cat each day. Use for 'how much should I feed my dog', "
+          "'food for a 4 kilo cat', 'how many calories does my puppy need'.",
+          {"species": _text("'dog' or 'cat'. Include 'puppy', 'kitten' or 'senior' if relevant."),
+           "weight": _text("The pet's weight, e.g. '12 kilos'."),
+           "age": _text("Optional age or life stage, e.g. 'puppy'."),
+           "activity": _text("'normal' normally. Also 'active', 'senior', 'diet'.")}, ["species", "weight"]),
+    _tool("tile_calculator", "How many tiles a floor needs, including waste. Use for 'how many tiles for a 3 by 4 meter room', "
+          "'tiles for 20 square meters with 60 by 60 tiles'.",
+          {"room": _text("The floor size, e.g. '3 by 4 meters'."),
+           "tile": _text("The tile size, e.g. '30 by 30 centimeters'."),
+           "waste": _text("Extra percent for cuts, e.g. '10'.")}, ["room", "tile"]),
+    _tool("concrete_calculator", "Concrete volume and bags for a slab. Use for 'how much concrete for a 4 by 3 meter slab', "
+          "'concrete for a shed base 10 centimeters thick'.",
+          {"length": _text("The length, e.g. '4 meters'."),
+           "width": _text("The width, e.g. '3 meters'."),
+           "thickness": _text("The thickness, e.g. '10 centimeters'.")}, ["length", "width", "thickness"]),
+    _tool("wire_gauge", "Wire diameter, cross section and rough current rating for an AWG size. Use for "
+          "'how thick is 12 gauge wire', 'how many amps can 18 AWG take', 'wire size for 20 amps'.",
+          {"gauge": _text("The gauge, e.g. '12' or '18 AWG'.")}, ["gauge"]),
+    _tool("solar_panels", "Rough solar system size and panel count from a monthly electricity bill. Use for "
+          "'how many solar panels do I need', 'size a solar system for 900 kilowatt hours a month'.",
+          {"monthly_kwh": _text("Monthly use in kilowatt hours, e.g. '900'."),
+           "sun_hours": _text("Peak sun hours a day, e.g. '4'. Leave empty to assume four."),
+           "panel_watts": _text("Panel size in watts, e.g. '400'. Leave empty for 400.")}, ["monthly_kwh"]),
+    _tool("fit_check", "A starting clothing size from height and weight. Use for 'what size am I', "
+          "'will a medium fit me at 180 centimeters and 80 kilos', 'what size in a slim fit'.",
+          {"height": _text("Height, e.g. '178 centimeters'."),
+           "weight": _text("Weight, e.g. '75 kilos'."),
+           "fit": _text("'regular' normally. Also 'slim' or 'loose'.")}, ["height", "weight"]),
+    _tool("inflation_adjust", "What an amount of money from one year is worth in another. Use for "
+          "'what is 100 from 1990 worth today', 'adjust 5000 for inflation since 2005'.",
+          {"amount": _text("The amount, e.g. '100'."),
+           "from_year": _text("The starting year, e.g. '1990'."),
+           "to_year": _text("The target year, e.g. '2026'. Leave empty for this year."),
+           "country": _text("Optional country for its price index, e.g. 'Germany'. Leave empty for the home country.")},
+          ["amount", "from_year", "to_year"]),
+    _tool("credit_payoff", "How long a credit card or loan takes to clear at a fixed payment. Use for "
+          "'how long to pay off 12000 at 24 percent paying 500 a month', 'credit card payoff time'.",
+          {"balance": _text("The amount owed, e.g. '12000'."),
+           "apr": _text("The yearly interest rate, e.g. '24 percent'."),
+           "payment": _text("The monthly payment, e.g. '500'.")}, ["balance", "apr", "payment"]),
+    _tool("emergency_fund", "How big an emergency fund should be and how much is missing. Use for "
+          "'how much emergency fund do I need', 'is 3 months of expenses enough', 'emergency savings for 20000 a month'.",
+          {"monthly_expenses": _text("Essential monthly expenses, e.g. '20000'."),
+           "months": _text("Months of cover, e.g. '6'. Default six."),
+           "saved": _text("How much is already saved, e.g. '50000'. Optional.")}, ["monthly_expenses"]),
+    _tool("rent_affordability", "How much of an income the rent takes and what is usually affordable. Use for "
+          "'is 15000 rent too much on 40000', 'how much rent can I afford', 'rent to income ratio'.",
+          {"income": _text("Monthly take-home income, e.g. '40000'."),
+           "rent": _text("Monthly rent, e.g. '15000'.")}, ["income", "rent"]),
+    _tool("flight_time", "Approximate flying time between two places. Use for 'how long is the flight from Prague to Tokyo', "
+          "'flying time to Lisbon', 'how many hours in the air'.",
+          {"from_place": _text("The departure place, e.g. 'Prague'."),
+           "to_place": _text("The destination, e.g. 'Tokyo'."),
+           "cruise": _text("Optional cruise speed in kilometers per hour, e.g. '850'.")},
+          ["from_place", "to_place"]),
+    _tool("jet_lag_plan", "A plan for shifting sleep before a flight across time zones. Use for "
+          "'how do I avoid jet lag to New York', 'jet lag plan for Tokyo', 'when should I sleep before flying'.",
+          {"from_place": _text("The departure place, e.g. 'Prague'. Leave empty for here."),
+           "to_place": _text("The destination, e.g. 'Tokyo'."),
+           "days": _text("Days before the flight, e.g. '3'.")}, ["to_place"]),
+    _tool("packing_list", "A packing list that follows the forecast at the destination. Use for "
+          "'what should I pack for Lisbon', 'packing list for five days in the mountains', 'what to take to the beach'.",
+          {"place": _text("The destination, e.g. 'Lisbon'."),
+           "days": _text("How many nights, e.g. '5'."),
+           "trip": _text("Optional trip type: 'business', 'beach', 'hiking' or 'camping'.")}, ["place", "days"]),
+    _tool("power_plug", "Plug type, voltage and frequency for a country. Use for 'what plug does Japan use', "
+          "'do I need an adapter for the UK', 'voltage in Brazil'.",
+          {"country": _text("The country, e.g. 'Japan'.")}, ["country"]),
+    _tool("log_journal", "Write a dated journal entry. Use for 'journal that I ...', 'write in my diary', "
+          "'note down how today went'.",
+          {"entry": _text("What to write, as the user said it, e.g. 'I walked by the river after work'.")}, ["entry"]),
+    _tool("read_journal", "Read back journal entries for a day, a week or everything. Use for "
+          "'what did I write today', 'read my journal from yesterday', 'what did I write this week'.",
+          {"period": _text("'today' normally. Also 'yesterday', 'this week', 'last week', 'this month', 'all'.")}),
+    _tool("weekly_review", "A summary of the last seven days: journal, spending, habits and mood. Use for "
+          "'how was my week', 'weekly review', 'what did I do this week'."),
+    _tool("grade_needed", "The final exam score needed to reach a target grade. Use for "
+          "'what do I need on the final to get 90', 'grade needed if I have 78 and the final is 30 percent'.",
+          {"current": _text("Current grade as a percentage, e.g. '78'."),
+           "target": _text("Wanted overall grade, e.g. '90'."),
+           "final_weight": _text("How much the final is worth, e.g. '30 percent'.")},
+          ["current", "target", "final_weight"]),
+    _tool("json_format", "Check whether JSON is valid and describe its shape. Use for 'is this JSON valid', "
+          "'check this JSON', 'why is my JSON broken'.",
+          {"text": _text("The JSON to check, e.g. '{\"a\": 1}'.")}, ["text"]),
+    _tool("regex_test", "Test a regular expression against a text. Use for 'does this regex match', "
+          "'test this pattern on this text', 'what does this regex find'.",
+          {"pattern": _text("The regular expression, e.g. '\\d+'."),
+           "text": _text("The text to test it on, e.g. 'order 1234 shipped'.")}, ["pattern", "text"]),
+    _tool("jwt_decode", "Read the header and claims of a JWT without verifying it. Use for "
+          "'decode this token', 'what is in this JWT', 'when does my token expire'.",
+          {"token": _text("The token, with or without the word Bearer, e.g. 'eyJhbGciOi...'.")}, ["token"]),
+    _tool("text_diff", "What changed between two pieces of text. Use for 'what changed between these two versions', "
+          "'compare these two paragraphs', 'diff these texts'.",
+          {"first": _text("The original text, e.g. 'the cat sat here'."),
+           "second": _text("The changed text, e.g. 'the dog sat there'.")}, ["first", "second"]),
+    _tool("rock_paper_scissors", "Play rock, paper, scissors. Use for 'let's play rock paper scissors', "
+          "'rock paper scissors, I pick rock'.",
+          {"choice": _text("'rock', 'paper' or 'scissors'.")}, ["choice"]),
+    _tool("fortune_cookie", "A short fortune, for fun. Use for 'fortune cookie', 'tell me my fortune', 'give me a fortune'."),
+    _tool("tarot_card", "Draw one tarot card for a question. Use for 'draw a tarot card', 'give me a tarot reading', "
+          "'what does the tarot say about my week'.",
+          {"question": _text("Optional question to focus the reading, e.g. 'my week'.")}),
+    _tool("lottery_numbers", "Random lottery numbers for a named game. Use for 'give me lottery numbers', "
+          "'eurojackpot numbers', 'powerball picks', 'six numbers from 49'.",
+          {"game": _text("The game, e.g. 'Eurojackpot', 'Powerball' or '6 from 49'.")}),
+]
+_EXTRA_SPECS.extend(_MORE_SPECS6)
 
 
 _DISABLED = {n.strip().lower() for n in _env("DISABLED_TOOLS").split(",") if n.strip()}
@@ -7780,6 +9741,30 @@ _NEW_EXCLUDED = {
 }
 
 _EXTRA_FUNCS.update(_NEW_FUNCS)
+
+# ---- the newest fifty tools ----------------------------------------------
+_NEW_FUNCS2 = {f.__name__: f for f in (
+    weather_on_date, air_quality_forecast, golden_hour, aurora_forecast, sky_tonight, meteor_shower,
+    reddit_top, arxiv_search, trending_searches, stackoverflow_search, github_user, domain_info,
+    link_preview, word_origin, pronounce_word, acronym_expand, city_info, movie_info, food_safety_temp,
+    defrost_time, wine_pairing, tea_brew, blood_pressure_check, pregnancy_due_date, pet_food,
+    tile_calculator, concrete_calculator, wire_gauge, solar_panels, fit_check, inflation_adjust,
+    credit_payoff, emergency_fund, rent_affordability, flight_time, jet_lag_plan, packing_list,
+    power_plug, log_journal, read_journal, weekly_review, grade_needed, json_format, regex_test,
+    jwt_decode, text_diff, rock_paper_scissors, fortune_cookie, tarot_card, lottery_numbers)}
+
+_EXTRA_FUNCS.update(_NEW_FUNCS2)
+
+_NEW_EXCLUDED2 = {
+    "weather_on_date", "reddit_top", "arxiv_search", "stackoverflow_search", "github_user", "domain_info",
+    "link_preview", "word_origin", "pronounce_word", "acronym_expand", "city_info", "movie_info",
+    "food_safety_temp", "defrost_time", "wine_pairing", "tea_brew", "blood_pressure_check",
+    "pregnancy_due_date", "pet_food", "tile_calculator", "concrete_calculator", "wire_gauge",
+    "solar_panels", "fit_check", "inflation_adjust", "credit_payoff", "emergency_fund",
+    "rent_affordability", "flight_time", "jet_lag_plan", "packing_list", "power_plug", "log_journal",
+    "read_journal", "grade_needed", "json_format", "regex_test", "jwt_decode", "text_diff",
+    "rock_paper_scissors", "fortune_cookie", "tarot_card", "lottery_numbers",
+}
 TOOL_FUNCTIONS.update({n: f for n, f in _EXTRA_FUNCS.items() if n not in _DISABLED})
 
 # Tools that make no sense inside a scheduled automation (they are for live conversation).
@@ -7833,6 +9818,7 @@ _EXTRA_AUTOMATION_EXCLUDED |= {
     "unix_time",
 }
 _EXTRA_AUTOMATION_EXCLUDED |= _NEW_EXCLUDED
+_EXTRA_AUTOMATION_EXCLUDED |= _NEW_EXCLUDED2
 AUTOMATION_EXCLUDED |= _EXTRA_AUTOMATION_EXCLUDED
 
 

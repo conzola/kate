@@ -2,13 +2,13 @@
 
 # Kate · LLM
 
-**The local brain of a 200-tool voice assistant.**
+**The local brain of a 250-tool voice assistant.**
 
 One model. Plain-text tags. No cloud LLM calls.
 
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
 ![LM Studio](https://img.shields.io/badge/LM%20Studio-local-6E56CF)
-![Tools](https://img.shields.io/badge/tools-200-16A34A)
+![Tools](https://img.shields.io/badge/tools-250-16A34A)
 ![License](https://img.shields.io/badge/license-MIT-0EA5E9)
 
 </div>
@@ -17,7 +17,7 @@ One model. Plain-text tags. No cloud LLM calls.
 >
 > `ask()` sends the turn to a local model. The model replies in plain text and drops tool tags inline, like `<get_weather; "Prague"/>`. Before anything is spoken, Python replaces those tags with live results. The model never has to *know* today's weather, the news, or the time — it only has to know **how to ask**.
 
-This folder is the LLM layer of [Kate](../README.md): the part between speech recognition and speech synthesis. It owns the conversation, the 200-tool catalog, and the scheduler that runs little workflows later on its own.
+This folder is the LLM layer of [Kate](../README.md): the part between speech recognition and speech synthesis. It owns the conversation, the 250-tool catalog, and the scheduler that runs little workflows later on its own.
 
 ---
 
@@ -42,7 +42,7 @@ This folder is the LLM layer of [Kate](../README.md): the part between speech re
 | **Model** | Any OpenAI-compatible server. Default: [LM Studio](https://lmstudio.ai/) + `qwen3.5-4b` |
 | **Endpoint** | The LM Studio URL configured by `LM_URL` in `main.py` — loopback or a LAN host |
 | **Tool protocol** | Prompt-driven inline tags — **not** native function calling |
-| **Tool catalog** | **200** Python functions returning speech-ready strings |
+| **Tool catalog** | **250** Python functions returning speech-ready strings |
 | **Automation blocks** | Any registered tool; the same catalog powers chat and schedules |
 | **Memory** | Last 12 messages (6 exchanges); reset after 10 minutes idle |
 | **Dependencies** | `requests`; `psutil` is optional (only for `pc_status`) |
@@ -52,7 +52,7 @@ This folder is the LLM layer of [Kate](../README.md): the part between speech re
 | File | Responsibility |
 |---|---|
 | [`main.py`](main.py) | One turn: prompt assembly, LM Studio call, streaming, memory, `/continue` |
-| [`tools.py`](tools.py) | 200 tool functions, the tool spec catalog, tag parser, timers and personal data |
+| [`tools.py`](tools.py) | 250 tool functions, the tool spec catalog, tag parser, timers and personal data |
 | [`automatization.py`](automatization.py) | Recurring workflows, trigger parsing, the scheduler and automation tags |
 
 ### Why this design is interesting
@@ -129,7 +129,7 @@ flowchart LR
     F --> G["resolve_tool_tags()"]
     G --> H["spoken text<br/>+ /continue"]
     H --> I["TTS / speaker"]
-    G -. "HTTP + local JSON" .-> J["200 tools"]
+    G -. "HTTP + local JSON" .-> J["250 tools"]
     F -. "writes" .-> K["automatizations.json"]
     K -. "read by" .-> L["scheduler_loop()"]
     L -. "runs later" .-> J
@@ -195,7 +195,7 @@ Unknown tool names and tags that are never closed are **left as text**, not exec
 
 ## The tool catalog
 
-**200 tools**, grouped by what they are for. Each one returns a short string designed to be spoken, not raw JSON.
+**250 tools**, grouped by what they are for. Each one returns a short string designed to be spoken, not raw JSON.
 
 <details open>
 <summary><b>Time, weather & sky</b> · 21 tools</summary>
@@ -427,6 +427,93 @@ Unknown tool names and tags that are never closed are **left as text**, not exec
 
 </details>
 
+<details>
+<summary><b>Newest 50</b> · 50 tools</summary>
+
+The latest batch of tools, in the order they were added to `tools.py`.
+
+**Weather, sky and the internet**
+
+| Tool | What it does |
+|---|---|
+| `weather_on_date` | What the weather was like on a past date |
+| `air_quality_forecast` | Air quality and pollen for today or tomorrow |
+| `golden_hour` | Morning and evening golden hour and blue hour |
+| `aurora_forecast` | Kp index and whether the aurora could reach you |
+| `sky_tonight` | Which bright planets are visible tonight, and where |
+| `meteor_shower` | The next meteor shower peak and how bright the moon will be |
+| `reddit_top` | Top posts in a subreddit today |
+| `arxiv_search` | Recent research papers on a topic |
+| `trending_searches` | What people are searching for in a country |
+| `stackoverflow_search` | Top Stack Overflow answers for a programming problem |
+| `github_user` | Repositories and followers of a GitHub user |
+| `domain_info` | Registrar, age and expiry of a domain |
+| `link_preview` | Title and description of a web page |
+
+**Words, places and films**
+
+| Tool | What it does |
+|---|---|
+| `word_origin` | Where a word comes from |
+| `pronounce_word` | Syllables and phonetics for a word |
+| `acronym_expand` | What an acronym usually stands for |
+| `city_info` | Population, elevation, timezone and coordinates of a city |
+| `movie_info` | Year, director and a short plot of a film |
+
+**Food, health and pets**
+
+| Tool | What it does |
+|---|---|
+| `food_safety_temp` | Safe internal temperature for meat, fish, eggs and leftovers |
+| `defrost_time` | Thawing time in the fridge, in water or in the microwave |
+| `wine_pairing` | A wine for a dish, with a cheaper alternative |
+| `tea_brew` | Water temperature and steeping time for a tea |
+| `blood_pressure_check` | Category for a blood pressure reading |
+| `pregnancy_due_date` | Estimated due date from the last period or conception |
+| `pet_food` | Daily food amount for a dog or a cat |
+
+**Home, money and travel**
+
+| Tool | What it does |
+|---|---|
+| `tile_calculator` | How many tiles a floor needs, including waste |
+| `concrete_calculator` | Concrete volume and 25 kilogram bags for a slab |
+| `wire_gauge` | Diameter, cross section and current rating for an AWG size |
+| `solar_panels` | Rough system size and panel count from a monthly bill |
+| `fit_check` | A starting clothing size from height and weight |
+| `inflation_adjust` | What an amount from one year is worth in another |
+| `credit_payoff` | How long a balance takes to clear at a fixed payment |
+| `emergency_fund` | How big a cushion should be and what is missing |
+| `rent_affordability` | Rent as a share of income, against the 30 percent guide |
+| `flight_time` | Approximate flying time between two places |
+| `jet_lag_plan` | A small sleep-shift plan before a flight |
+| `packing_list` | A packing list that follows the destination forecast |
+| `power_plug` | Plug type, voltage and frequency for a country |
+
+**Journal, school and text**
+
+| Tool | What it does |
+|---|---|
+| `log_journal` | Write a dated journal entry |
+| `read_journal` | Read back entries for a day, a week or everything |
+| `weekly_review` | Journal, spending, habits and mood for the last seven days |
+| `grade_needed` | Final exam score needed to reach a target grade |
+| `json_format` | Check whether JSON is valid and describe its shape |
+| `regex_test` | Test a regular expression against a text |
+| `jwt_decode` | Read a JWT header and claims without verifying it |
+| `text_diff` | What changed between two pieces of text |
+
+**Fun**
+
+| Tool | What it does |
+|---|---|
+| `rock_paper_scissors` | Play rock, paper, scissors |
+| `fortune_cookie` | A short fortune |
+| `tarot_card` | Draw one tarot card for a question |
+| `lottery_numbers` | Random lottery numbers for a named game |
+
+</details>
+
 > **Adding your own:** see [Extending the catalog](#extending-the-catalog). The tool prompt and the automation block list are generated from the same `TOOLS` list, so the two features stay in sync.
 
 ---
@@ -487,7 +574,7 @@ The `automatization` spelling is the one used by the code and tags. Removal matc
 
 Any registered tool can be written as a block. That flexibility is best used for read-only information tools. Timers, the stopwatch, random one-shots and tools that change personal data are poor fits — they depend on the moment or on a live user.
 
-Read-only tools added later fit well too: `what_to_wear`, `clock_change`, `long_weekends`, `ssl_expiry`, `next_launch` and `weight_trend`. For example, `<new_automatization; time="on weekdays at 7:30 AM"; actions="what_to_wear=\"Prague\""/>` tells you what to put on every morning.
+Read-only tools added later fit well too: `what_to_wear`, `clock_change`, `long_weekends`, `ssl_expiry`, `next_launch` and `weight_trend`. The newest batch adds `sky_tonight`, `meteor_shower`, `aurora_forecast`, `air_quality_forecast`, `trending_searches`, `golden_hour` and `weekly_review`. For example, `<new_automatization; time="on weekdays at 7:30 AM"; actions="what_to_wear=\"Prague\""/>` tells you what to put on every morning.
 
 `set_volume` is a deliberate exception: "every night at 10 PM turn the volume down" is a legitimate automation.
 
@@ -570,7 +657,7 @@ Forecasts, geocoding, air quality, pollen and world time use Open-Meteo. Currenc
 | `AUTOMATIONS_FILE` | `<repo>/automatizations.json` | Workflow storage |
 | `TIMERS_FILE` | `<repo>/timers.json` | Timers, reminders and stopwatch |
 | `DEVICE_STATE_FILE` | `<repo>/device_state.json` | Speaker volume |
-| `USER_DATA_FILE` | `<repo>/user_data.json` | Home city, notes, lists, calendar, habits, expenses, birthdays, weight log |
+| `USER_DATA_FILE` | `<repo>/user_data.json` | Home city, notes, lists, calendar, habits, expenses, birthdays, weight log, journal |
 
 ---
 
@@ -584,7 +671,7 @@ Nothing important lives only in RAM. These JSON files sit next to the code at th
 | `automatizations.json` | [`automatization.py`](automatization.py) | Triggers, action pipelines, `last_run` |
 | `timers.json` | [`tools.py`](tools.py) | Active timers, reminders, alarms and stopwatch |
 | `device_state.json` | [`tools.py`](tools.py) | Speaker volume |
-| `user_data.json` | [`tools.py`](tools.py) | Home location, notes, lists, calendar, habits, expenses, birthdays and weight log |
+| `user_data.json` | [`tools.py`](tools.py) | Home location, notes, lists, calendar, habits, expenses, birthdays, weight log and journal |
 
 All of them use a temp-file-plus-replace write, guarded by locks where two threads can touch the same file. They are ignored by git. Delete a file while the app is stopped to reset that store; use `reset_memory()` for the live conversation.
 
