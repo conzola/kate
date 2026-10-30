@@ -21,5 +21,6 @@ output_custom_voice.wav
 esp_last_recording.wav
 esp_recordings/
 
+
 # Release artifacts
 dist/

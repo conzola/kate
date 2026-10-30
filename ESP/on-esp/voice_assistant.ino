@@ -4,20 +4,39 @@
   Mic:      MAX4466 analog out -> GPIO32 (ADC1_CHANNEL_4)
   Speaker:  MAX98357A (optional, set HAVE_SPEAKER 1 once it is wired)
               BCLK -> GPIO26, LRC -> GPIO25, DIN -> GPIO22, VIN -> 5V, GND -> GND
+  LED:      GPIO2 by default (set LED_ACTIVE_LOW 1 if yours lights on LOW)
 
   Files in this sketch folder (they open as tabs in the Arduino IDE):
     voice_assistant.ino   this file
     hey_kate_model.h      your hey_kate.tflite as a C array (62,304 bytes, stays in flash)
+
+  BLE companion
+  -------------
+  The sketch also runs the Kate BLE service from ESP/on-esp-ble, so the Android app can
+  show live status and change volume/LED while the assistant is listening:
+
+    Service   4b617465-0000-1000-8000-00805f9b34fb
+    Info      4b617465-0001-1000-8000-00805f9b34fb  READ + NOTIFY (JSON)
+    Command   4b617465-0002-1000-8000-00805f9b34fb  WRITE
+
+  Status notifications are paused while a prompt is being recorded, so the BLE radio
+  does not disturb the microphone. Set ENABLE_BLE to 0 if you need the RAM back:
+  Wi-Fi, BLE, I2S buffers and the TensorFlow Lite arena share the ESP32's ~320 KB.
 
   Needs (read the notes at the bottom of the chat message too):
     * Arduino-ESP32 core 2.0.x (I2S built-in ADC mode is gone in 3.x)
     * A TensorFlow Lite Micro library that is recent enough for this model
       (CALL_ONCE / VAR_HANDLE / READ_VARIABLE / ASSIGN_VARIABLE ops) AND contains the
       microfrontend (tensorflow/lite/experimental/microfrontend/lib/frontend.h)
+    * Partition scheme: Huge APP (3MB No OTA/1MB SPIFFS). Wi-Fi + BLE + TFLite does
+      not fit in the default 1.3 MB app slot.
 */
 
 #include <WiFi.h>
 #include <Preferences.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLE2902.h>
 #include <driver/i2s.h>
 #include <driver/adc.h>
 
@@ -40,6 +59,20 @@ const char*    SERVER_HOST = "";                  // <- change to your server's 
 const uint16_t SERVER_PORT = 8000;
 const char*    SERVER_PATH = "/talk";
 #define HAVE_SPEAKER 0                          // set to 1 when the MAX98357A is wired
+
+// BLE companion (same service as ESP/on-esp-ble). Set to 0 to save RAM.
+#define ENABLE_BLE 1
+
+#define DEVICE_NAME "Kate"
+#define KATE_FIRMWARE "1.1.0"
+#define LED_PIN 2
+#define LED_ACTIVE_LOW 0
+#define BLE_STATUS_INTERVAL_MS 1000UL
+#define IDENTIFY_BLINK_MS 130UL
+
+static const char *BLE_SERVICE_UUID = "4b617465-0000-1000-8000-00805f9b34fb";
+static const char *BLE_INFO_UUID = "4b617465-0001-1000-8000-00805f9b34fb";
+static const char *BLE_COMMAND_UUID = "4b617465-0002-1000-8000-00805f9b34fb";
 
 // Wake word detection. Check these against the .json that came with hey_kate.tflite
 // (probability_cutoff and sliding_window_size). These are common defaults.
@@ -72,7 +105,19 @@ const float LIMIT_KNEE         = 18000.0f;      // above this the signal is comp
 #define     DMA_LEN            512              // I2S ADC DMA buffer, in samples (max 1024). 1024 gave a click every 16 ms; 512 -> 8 ms.
 const wifi_power_t WIFI_TX_POWER = WIFI_POWER_15dBm;   // lower TX bursts disturb the ADC less (WIFI_POWER_19_5dBm = default)
 
-int volume = 40;                                // 0..100 (software volume, squared curve). The server overrides it on every reply ("Hey Kate, louder"); v50 in the Serial Monitor only lasts until the next reply
+int volume = 40;                                // 0..100 (software volume, squared curve). Shared by Serial, BLE and the server ("Hey Kate, louder"); the server overrides it on every reply
+Preferences katePrefs;                          // NVS namespace "kate-ble", shared with the standalone sketch
+bool katePrefsReady = false;
+bool ledOn = false;                             // BLE LED switch (GPIO2)
+
+void setVolume(int newVolume) {
+  newVolume = constrain(newVolume, 0, 100);
+  if (newVolume == volume) return;
+  volume = newVolume;
+#if ENABLE_BLE
+  if (katePrefsReady) katePrefs.putUChar("volume", (uint8_t)volume);
+#endif
+}
 // ==================================================
 
 const int SAMPLE_RATE = 16000;
@@ -514,7 +559,7 @@ bool receiveAndPlayReply(bool measureLatency) {
     return false;
   }
   if (hdrVolume >= 0 && hdrVolume != volume) {          // the server owns the volume (voice command), also on 204 replies
-    volume = hdrVolume;
+    setVolume(hdrVolume);
     Serial.printf("volume = %d (from server)\n", volume);
   }
   if (hdrLatency.length() > 0) {                        // the PC measured ASR / LLM / TTS for this turn
@@ -621,6 +666,238 @@ void refreshUpload() {
   uploadReady = false;
 }
 
+// ---------- BLE companion (merged from ESP/on-esp-ble) ----------
+#if ENABLE_BLE
+BLEServer*         bleServer = nullptr;
+BLECharacteristic* bleInfoCharacteristic = nullptr;
+BLEAdvertising*    bleAdvertising = nullptr;
+
+volatile bool bleConnected = false;
+volatile bool bleAdvertisingRestartPending = false;
+volatile bool bleForceStatus = false;
+volatile bool bleRefreshRequested = false;
+volatile bool bleIdentifyRequested = false;
+volatile int8_t  bleLedRequest = -1;        // -1 = none, 0 = off, 1 = on
+volatile int16_t bleVolumeRequest = -1;     // -1 = none, 0..100
+volatile unsigned long bleDisconnectedAt = 0;
+unsigned long bleLastStatusAt = 0;
+
+bool identifyActive = false;
+bool identifyOutput = false;
+uint8_t identifyBlinksLeft = 0;
+unsigned long identifyNextAt = 0;
+
+void applyLed() {
+  bool output = identifyActive ? identifyOutput : ledOn;
+  bool level = LED_ACTIVE_LOW ? !output : output;
+  digitalWrite(LED_PIN, level ? HIGH : LOW);
+}
+
+void startIdentify() {
+  identifyActive = true;
+  identifyOutput = true;
+  identifyBlinksLeft = 6;
+  identifyNextAt = millis() + IDENTIFY_BLINK_MS;
+  applyLed();
+}
+
+void serviceIdentify() {
+  if (!identifyActive) return;
+  unsigned long now = millis();
+  if ((long)(now - identifyNextAt) < 0) return;
+
+  identifyOutput = !identifyOutput;
+  applyLed();
+  if (identifyBlinksLeft > 0) identifyBlinksLeft--;
+  identifyNextAt = now + IDENTIFY_BLINK_MS;
+
+  if (identifyBlinksLeft == 0) {
+    identifyActive = false;
+    identifyOutput = false;
+    applyLed();
+  }
+}
+
+String buildBleStatus() {
+  bool wifiUp = WiFi.status() == WL_CONNECTED;
+  String ip = wifiUp ? WiFi.localIP().toString() : "";
+  int rssi = wifiUp ? WiFi.RSSI() : 0;
+
+  float temperature = temperatureRead();
+  bool temperatureOk = !isnan(temperature) && temperature > -40.0f && temperature < 150.0f;
+
+  String json;
+  json.reserve(256);
+  json += "{";
+  json += "\"name\":\"" DEVICE_NAME "\",";
+  json += "\"fw\":\"" KATE_FIRMWARE "\",";
+  json += "\"chip\":\"" + String(ESP.getChipModel()) + "\",";
+  json += "\"uptime\":" + String(millis() / 1000UL) + ",";
+  json += "\"heap\":" + String(ESP.getFreeHeap()) + ",";
+  json += "\"wifi\":" + String(wifiUp ? "true" : "false") + ",";
+  json += "\"ip\":\"" + ip + "\",";
+  json += "\"rssi\":" + String(rssi) + ",";
+  json += "\"temp\":" + (temperatureOk ? String(temperature, 1) : String("-1")) + ",";
+  json += "\"volume\":" + String(volume) + ",";
+  json += "\"state\":\"" + String(bleConnected ? "connected" : "advertising") + "\",";
+  json += "\"led\":" + String(ledOn ? "true" : "false");
+  json += "}";
+  return json;
+}
+
+void publishBleStatus() {
+  if (!bleConnected || bleInfoCharacteristic == nullptr) return;
+  String json = buildBleStatus();
+  // Raw bytes work with both the 1.x/2.x String API and the 3.x API.
+  bleInfoCharacteristic->setValue((uint8_t*)json.c_str(), json.length());
+  bleInfoCharacteristic->notify();
+  bleLastStatusAt = millis();
+  bleForceStatus = false;
+}
+
+class KateBleServerCallbacks : public BLEServerCallbacks {
+  void onConnect(BLEServer* server) override {
+    bleConnected = true;
+    bleAdvertisingRestartPending = false;
+    bleForceStatus = true;
+    if (bleAdvertising != nullptr) bleAdvertising->stop();
+    Serial.println(">> Phone connected over BLE");
+  }
+
+  void onDisconnect(BLEServer* server) override {
+    bleConnected = false;
+    bleAdvertisingRestartPending = true;
+    bleDisconnectedAt = millis();
+    Serial.println(">> Phone disconnected from BLE");
+  }
+};
+
+class KateBleCommandCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* characteristic) override {
+    String value = characteristic->getValue().c_str();
+    value.trim();
+    if (value.length() == 0) return;
+
+    Serial.printf(">> BLE command: %s\n", value.c_str());
+
+    if (value.indexOf("identify") >= 0) {
+      bleIdentifyRequested = true;
+      return;
+    }
+
+    if (value.indexOf("\"cmd\":\"volume\"") >= 0) {
+      int valueKey = value.indexOf("\"value\"");
+      int colon = valueKey >= 0 ? value.indexOf(':', valueKey) : -1;
+      if (colon >= 0) {
+        int requested = value.substring(colon + 1).toInt();
+        bleVolumeRequest = (int16_t)constrain(requested, 0, 100);
+      }
+      return;
+    }
+
+    if (value.indexOf("\"cmd\":\"led\"") >= 0) {
+      bleLedRequest = value.indexOf("true") >= 0 ? 1 : 0;
+      return;
+    }
+
+    if (value.indexOf("refresh") >= 0) {
+      bleRefreshRequested = true;
+    }
+  }
+};
+
+void setupBle() {
+  size_t heapBefore = ESP.getFreeHeap();
+  Serial.printf("Starting BLE companion (free heap %u)...\n", (unsigned)heapBefore);
+  BLEDevice::init(DEVICE_NAME);
+  BLEDevice::setMTU(517);
+
+  bleServer = BLEDevice::createServer();
+  bleServer->setCallbacks(new KateBleServerCallbacks());
+
+  BLEService* service = bleServer->createService(BLE_SERVICE_UUID);
+
+  bleInfoCharacteristic = service->createCharacteristic(
+      BLE_INFO_UUID,
+      BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+  bleInfoCharacteristic->addDescriptor(new BLE2902());
+
+  BLECharacteristic* commandCharacteristic = service->createCharacteristic(
+      BLE_COMMAND_UUID,
+      BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
+  commandCharacteristic->setCallbacks(new KateBleCommandCallbacks());
+
+  service->start();
+
+  String initialStatus = buildBleStatus();
+  bleInfoCharacteristic->setValue((uint8_t*)initialStatus.c_str(), initialStatus.length());
+
+  bleAdvertising = BLEDevice::getAdvertising();
+  bleAdvertising->addServiceUUID(BLE_SERVICE_UUID);
+  bleAdvertising->setScanResponse(true);
+  bleAdvertising->setMinPreferred(0x06);
+  bleAdvertising->start();
+
+  Serial.println();
+  Serial.println("Kate BLE is ready.");
+  Serial.printf("Name:    %s\n", DEVICE_NAME);
+  Serial.printf("Service: %s\n", BLE_SERVICE_UUID);
+  Serial.printf("BLE heap: %u -> %u bytes free\n",
+                (unsigned)heapBefore, (unsigned)ESP.getFreeHeap());
+  Serial.println("Open the Kate Android app and tap Scan for Kate.");
+}
+
+// Called from loop(). statusAllowed is false while recording, so notifications do not
+// compete with the microphone; commands and the identify blink still work.
+void serviceBle(bool statusAllowed) {
+  if (bleRefreshRequested) {
+    bleRefreshRequested = false;
+    bleForceStatus = true;
+  }
+
+  if (bleIdentifyRequested) {
+    bleIdentifyRequested = false;
+    startIdentify();
+  }
+
+  if (bleLedRequest >= 0) {
+    ledOn = bleLedRequest != 0;
+    bleLedRequest = -1;
+    if (katePrefsReady) katePrefs.putBool("led", ledOn);
+    applyLed();
+    bleForceStatus = true;
+    Serial.printf(">> BLE LED %s\n", ledOn ? "on" : "off");
+  }
+
+  if (bleVolumeRequest >= 0) {
+    int requested = bleVolumeRequest;
+    bleVolumeRequest = -1;
+    setVolume(requested);
+    bleForceStatus = true;
+    Serial.printf(">> BLE volume %d\n", volume);
+  }
+
+  serviceIdentify();
+
+  if (bleConnected && statusAllowed &&
+      (bleForceStatus || millis() - bleLastStatusAt >= BLE_STATUS_INTERVAL_MS)) {
+    publishBleStatus();
+  }
+
+  if (!bleConnected && bleAdvertisingRestartPending &&
+      millis() - bleDisconnectedAt > 500UL) {
+    bleAdvertisingRestartPending = false;
+    if (bleAdvertising != nullptr) bleAdvertising->start();
+    bleLastStatusAt = 0;
+    Serial.println(">> BLE advertising again");
+  }
+}
+#else
+void serviceBle(bool statusAllowed) {
+  (void)statusAllowed;
+}
+#endif
+
 // ---------- main ----------
 enum State { LISTENING, RECORDING };
 static State state = LISTENING;
@@ -657,6 +934,16 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.println("\n\"Hey Kate\" assistant starting");
+
+#if ENABLE_BLE
+  pinMode(LED_PIN, OUTPUT);
+  katePrefs.begin("kate-ble", false);
+  katePrefsReady = true;
+  volume = constrain((int)katePrefs.getUChar("volume", 40), 0, 100);
+  ledOn = katePrefs.getBool("led", false);
+  applyLed();
+#endif
+
   tuneMicRate();                // measures the real ADC rate and corrects it to 16 kHz
   setupSpeaker();
   if (!setupWakeWord()) {
@@ -664,6 +951,9 @@ void setup() {
     while (true) delay(1000);
   }
   connectWiFi();
+#if ENABLE_BLE
+  setupBle();
+#endif
   Serial.printf("Free heap: %u, largest block: %u\n", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
   Serial.println("Calibrating noise floor, stay quiet for 2 seconds...");
   for (int i = 0; i < 200; i++) noiseFloor += (readChunk() - noiseFloor) * 0.05f;
@@ -672,8 +962,10 @@ void setup() {
 }
 
 void loop() {
+  serviceBle(state == LISTENING);
+
   if (Serial.available() && Serial.read() == 'v') {
-    volume = constrain(Serial.parseInt(), 0, 100);
+    setVolume(Serial.parseInt());
     Serial.printf("volume = %d\n", volume);
   }
 

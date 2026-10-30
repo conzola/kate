@@ -61,7 +61,8 @@ This is the repository around [the LLM layer](LLM/README.md): a wake-word assist
 |---|---|
 | [`Final/main.py`](Final/main.py) | PC host: wake word, recording, barge-in, streaming playback, automation scheduler |
 | [`ESP/on-pc/server.py`](ESP/on-pc/server.py) | FastAPI bridge: streamed WAV replies, long-poll announcements, timers, volume headers |
-| [`ESP/on-esp/voice_assistant.ino`](ESP/on-esp/voice_assistant.ino) | ESP32 sketch: wake word, mic capture, HTTP upload and audio playback |
+| [`ESP/on-esp/voice_assistant.ino`](ESP/on-esp/voice_assistant.ino) | ESP32 sketch: wake word, mic capture, HTTP upload, audio playback and the BLE companion service |
+| [`android/`](android/README.md) | Android companion app: BLE scan/connect, live telemetry, controls |
 | [`ASR/main.py`](ASR/main.py) | Qwen3-ASR model, transcription and startup warmup |
 | [`ASR/record.py`](ASR/record.py) | Microphone capture, noise calibration, end-of-speech detection, barge-in detector |
 | [`TTS/main.py`](TTS/main.py) | Kokoro-82M streaming synthesis, sentence splitting and text cleanup |
@@ -162,7 +163,7 @@ Stay quiet for the ambient-noise calibration. Kate warms up speech recognition a
 
 1. Open [`ESP/on-esp/voice_assistant.ino`](ESP/on-esp/voice_assistant.ino) and set `WIFI_SSID`, `WIFI_PASS` and `SERVER_HOST` (the PC's LAN address).
 2. Set `HAVE_SPEAKER` to `1` once the MAX98357A is wired.
-3. Flash the sketch. It needs the Arduino-ESP32 core **2.0.x** and a TensorFlow Lite Micro library with the microfrontend.
+3. Flash the sketch. It needs the Arduino-ESP32 core **2.0.x**, a TensorFlow Lite Micro library with the microfrontend, and the **Huge APP (3MB No OTA/1MB SPIFFS)** partition scheme (Wi-Fi + BLE + TFLite does not fit the default 1.3 MB app slot).
 4. Start the bridge on the PC:
 
    ```powershell
